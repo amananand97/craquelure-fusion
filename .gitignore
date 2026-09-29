@@ -1,0 +1,23 @@
+# Environments
+.venv/
+venv/
+.conda/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Secrets - never commit
+.env
+.env.*
+*.key
+*.pem
+
+# Scratch output (the fixed eval set will live elsewhere and IS committed)
+samples/
+
+# OS / editor
+.DS_Store
