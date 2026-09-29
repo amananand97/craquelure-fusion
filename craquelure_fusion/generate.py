@@ -159,7 +159,9 @@ def paint_line(rgb: np.ndarray, mask: np.ndarray, darkness: float) -> np.ndarray
     # TODO(1): copy rgb, multiply the masked pixels by (1 - darkness), return the copy.
     #   rgb has shape (H, W, 3); mask has shape (H, W).
     #   rgb[mask] selects the masked pixels as an (N, 3) array.
-    raise NotImplementedError("TODO(1)")
+    out = rgb.copy()
+    out[mask] *= (1 - darkness)
+    return out
 
 
 def carve_crack(height: np.ndarray, mask: np.ndarray, depth: float) -> np.ndarray:
@@ -168,7 +170,9 @@ def carve_crack(height: np.ndarray, mask: np.ndarray, depth: float) -> np.ndarra
     Must return a NEW array. The input must be unchanged afterwards.
     """
     # TODO(2): same pattern as TODO(1), but for a 2-D array, and subtract instead of multiply.
-    raise NotImplementedError("TODO(2)")
+    out = height.copy()
+    out[mask] -= depth
+    return out
 
 
 def generate_sample(cfg: SampleConfig) -> Sample:
@@ -186,7 +190,7 @@ def generate_sample(cfg: SampleConfig) -> Sample:
     # Stroke: dark, flat.
     # TODO(3): apply the stroke. Which array changes, and which stays alone?
     #   Write the line, then a one-line comment saying WHY.
-    raise NotImplementedError("TODO(3)")
+    rgb = paint_line(rgb, stroke, cfg.line_darkness)
 
     logger.info(
         "Sample seed=%d: crack %d px, stroke %d px, overlap %d px",
