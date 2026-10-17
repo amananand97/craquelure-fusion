@@ -113,12 +113,23 @@ def decode_height(encoded: np.ndarray) -> np.ndarray:
 
 
 def save_sample(sample: Sample, out_dir: Path) -> None:
-    """Write rgb.png (8-bit), height.png (16-bit), mask.png (0/255)."""
+    """Write rgb.png (8-bit), height.png (16-bit), mask.png and stroke_mask.png (0/255)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.round(sample.rgb * 255).astype(np.uint8)).save(out_dir / "rgb.png")
     Image.fromarray(encode_height(sample.height)).save(out_dir / "height.png")
     Image.fromarray(sample.crack_mask.astype(np.uint8) * 255).save(out_dir / "mask.png")
-    logger.info("Saved rgb.png, height.png, mask.png to %s", out_dir)
+    Image.fromarray(sample.stroke_mask.astype(np.uint8) * 255).save(out_dir / "stroke_mask.png")
+    logger.info("Saved rgb, height, mask and stroke_mask to %s", out_dir)
+
+
+def load_sample(in_dir: Path) -> Sample:
+    """Read a sample back from disk. Evaluation always reads from disk, never from memory,
+    so what a model sees is exactly what was saved (including 8-bit rounding of rgb)."""
+    rgb = np.array(Image.open(in_dir / "rgb.png").convert("RGB"), dtype=np.float32) / 255.0
+    height = decode_height(np.array(Image.open(in_dir / "height.png")))
+    crack = np.array(Image.open(in_dir / "mask.png")) > 0
+    stroke = np.array(Image.open(in_dir / "stroke_mask.png")) > 0
+    return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke)
 
 
 def save_preview(sample: Sample, path: Path) -> None:
@@ -145,7 +156,7 @@ def save_preview(sample: Sample, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# YOUR PART: three TODOs. These are the decisions that make the data honest.
+# Marking the surface: the three decisions that make the data honest.
 # ---------------------------------------------------------------------------
 
 def paint_line(rgb: np.ndarray, mask: np.ndarray, darkness: float) -> np.ndarray:
@@ -156,11 +167,8 @@ def paint_line(rgb: np.ndarray, mask: np.ndarray, darkness: float) -> np.ndarray
 
     Must return a NEW array. The input must be unchanged afterwards.
     """
-    # TODO(1): copy rgb, multiply the masked pixels by (1 - darkness), return the copy.
-    #   rgb has shape (H, W, 3); mask has shape (H, W).
-    #   rgb[mask] selects the masked pixels as an (N, 3) array.
     out = rgb.copy()
-    out[mask] *= (1 - darkness)
+    out[mask] *= (1 - darkness)  # (H, W, 3) array, masked pixels only
     return out
 
 
@@ -169,9 +177,8 @@ def carve_crack(height: np.ndarray, mask: np.ndarray, depth: float) -> np.ndarra
 
     Must return a NEW array. The input must be unchanged afterwards.
     """
-    # TODO(2): same pattern as TODO(1), but for a 2-D array, and subtract instead of multiply.
     out = height.copy()
-    out[mask] -= depth
+    out[mask] -= depth  # (H, W) array, masked pixels only
     return out
 
 
@@ -187,9 +194,8 @@ def generate_sample(cfg: SampleConfig) -> Sample:
     rgb = paint_line(rgb, crack, cfg.line_darkness)
     height = carve_crack(height, crack, cfg.crack_depth)
 
-    # Stroke: dark, flat.
-    # TODO(3): apply the stroke. Which array changes, and which stays alone?
-    #   Write the line, then a one-line comment saying WHY.
+    # Stroke: dark, flat. Paint sits on top, so only the colour changes;
+    # carving the stroke too would make it identical to a crack in both images.
     rgb = paint_line(rgb, stroke, cfg.line_darkness)
 
     logger.info(

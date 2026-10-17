@@ -1,7 +1,5 @@
-"""Tests for the sample generator.
-
-Before the TODOs are filled in, some of these fail on purpose.
-"""
+"""Tests for the sample generator: shapes, saving, and the physics
+(crack and stroke alike in colour, different in height)."""
 
 from pathlib import Path
 
@@ -26,7 +24,7 @@ def _lightness(rgb: np.ndarray) -> np.ndarray:
     return rgb.mean(axis=-1)
 
 
-# --- plumbing: these pass before you touch anything ------------------------
+# --- plumbing ---------------------------------------------------------------
 
 def test_canvas_shapes_and_ranges() -> None:
     rgb, height = make_canvas(CFG, np.random.default_rng(0))
@@ -48,7 +46,7 @@ def test_height_png_round_trip(tmp_path: Path) -> None:
     assert np.abs(back - height).max() < 1e-3
 
 
-# --- your TODOs: these fail until you fill them in -------------------------
+# --- the three marking decisions ----------------------------------------------
 
 def test_paint_line_does_not_mutate_input() -> None:
     rgb, _ = make_canvas(CFG, np.random.default_rng(0))

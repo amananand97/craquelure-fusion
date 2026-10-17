@@ -21,3 +21,8 @@ samples/
 
 # OS / editor
 .DS_Store
+
+# local clutter
+.DS_Store
+__pycache__/
+.pytest_cache/
