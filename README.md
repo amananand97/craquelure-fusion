@@ -45,16 +45,22 @@ flowchart LR
 | `craquelure_fusion/baseline.py` | four score maps from one detector (black top-hat): colour, height, OR (max), AND (geometric mean) |
 | `craquelure_fusion/metrics.py` | tolerant (2 px) precision/recall, PR curve, AP, false-alarm rate per confuser |
 | `craquelure_fusion/evaluate.py` | the experiment protocol and all outputs in `results/` |
-| `app/streamlit_app.py` | presentation: question, one sample, results |
+| `craquelure_fusion/pipeline.py` | the experiment as six named steps with pass conditions, plus demo faults (in memory only) |
+| `app/streamlit_app.py` | interactive page: run the six steps, watch each turn green or red, click a step for what it does, results underneath |
 | `data/eval_v1` | first data set (no impasto, seeds 1000+), kept for history; shows why v2 was needed |
 
 ## Run
 
-    pip install -r requirements.txt
-    python -m pytest -q                                   # 35 tests
+    conda create -n crack python=3.12 -y && conda activate crack
+    pip install -r requirements.txt                       # on macOS this pulls scipy >= 1.17.1
+    python -m pytest -q                                   # 43 tests
     python -m craquelure_fusion.eval_set --split eval --verify
     python -m craquelure_fusion.evaluate                  # ~30 s, writes results/
-    streamlit run app/streamlit_app.py
+    streamlit run app/streamlit_app.py                    # opens http://localhost:8501
+
+**macOS note:** scipy older than 1.17.1 fails to load on recent macOS (`_spropack ... __thread_bss`); scipy 1.17+ needs Python 3.11+, hence the Python 3.12 environment.
+
+**The page:** press *Run pipeline*. A progress bar fills as six steps run; each box turns green (passed) or red (failed); later steps are skipped after a failure. *What's inside* on any box explains the step, its pass condition, and, on failure, the file and line where it broke. The sidebar can inject a fault (tampered file, height sensor off, model bug, 6 px misalignment), each caught by a different step. Faults run in memory or on a temporary copy; committed data is never touched.
 
 Fixed sets are never rebuilt in place. A change to the data design gets a new version (`--version`).
 `practice/` holds learning exercises and is not part of the test run.

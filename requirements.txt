@@ -1,5 +1,6 @@
 numpy>=1.24
 scipy>=1.10
+scipy>=1.17.1; sys_platform == "darwin"  # older scipy fails to load on recent macOS
 pillow>=10.0
 matplotlib>=3.7
 pytest>=7.0
