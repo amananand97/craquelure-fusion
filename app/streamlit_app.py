@@ -1,12 +1,12 @@
-"""Presentation app: the whole pipeline, one sample at a time, then the results.
+"""Presentation: the question, the pipeline, one sample, the results.
 
-Run from the repo root:
+Run from the repo root (after `python -m craquelure_fusion.evaluate`):
     streamlit run app/streamlit_app.py
 """
 
 from __future__ import annotations
 
-import csv
+import json
 import sys
 from pathlib import Path
 
@@ -14,51 +14,65 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
 import streamlit as st  # noqa: E402
 import streamlit.components.v1 as components  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from craquelure_fusion.baseline import predict_colour_only, predict_fused  # noqa: E402
+from craquelure_fusion.baseline import MODELS  # noqa: E402
 from craquelure_fusion.eval_set import verify_eval_set  # noqa: E402
 from craquelure_fusion.generate import load_sample  # noqa: E402
-from craquelure_fusion.metrics import stroke_false_alarm_rate, tolerant_precision_recall  # noqa: E402
 
-EVAL_DIR = ROOT / "data" / "eval"
-RESULTS = ROOT / "results" / "results.csv"
+EVAL_DIR = ROOT / "data" / "eval_v2"
+VAL_DIR = ROOT / "data" / "val_v2"
+RESULTS = ROOT / "results"
 
 PIPELINE = """
 flowchart LR
-  subgraph GEN["1. Generate (synthetic, ground truth known)"]
-    G["generate.py<br/>one fake painting"] --> RGB["rgb.png"]
-    G --> H["height.png"]
-    G --> M["mask.png<br/>crack = answer"]
-    G --> S["stroke_mask.png<br/>confuser"]
+  subgraph DATA["1. Data (synthetic, answer known)"]
+    G["generator"] --> RGB["photo (rgb)"]
+    G --> H["height map"]
+    G --> M["crack mask = answer"]
+    G --> C["confuser masks:<br/>stroke (dark, flat)<br/>impasto (sunken, not dark)"]
   end
-  subgraph MODELS["2. Models"]
-    RGB --> A["Model A<br/>colour only"]
-    RGB --> B["Model B<br/>colour + height"]
-    H --> B
+  subgraph MODELS["2. Three models, same detector"]
+    RGB --> A["colour only"]
+    H --> B["height only"]
+    RGB --> F["colour AND height"]
+    H --> F
   end
-  subgraph EVAL["3. Evaluate on the FIXED set"]
-    A --> E["compare with mask.png"]
+  subgraph EXP["3. Experiment"]
+    V["val set: choose cutoff<br/>at 90% recall"] --> E
+    A --> E["eval set: score"]
     B --> E
+    F --> E
     M --> E
-    S --> E
-    E --> R["precision, recall,<br/>stroke false alarms"]
+    C --> E
+    E --> R["AP, false alarms per confuser,<br/>paired 95% intervals"]
+    E --> S["stress test:<br/>shift height 0-4 px"]
   end
 """
 
 
-def _sample_ids() -> list[str]:
+def _ids() -> list[str]:
     return sorted(p.name for p in EVAL_DIR.iterdir() if p.is_dir() and p.name.isdigit())
 
 
-def page_pipeline() -> None:
-    st.header("The pipeline")
-    st.write("Every number on the next pages comes from the boxes below, in this order.")
+def _summary() -> dict | None:
+    path = RESULTS / "summary.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def page_question() -> None:
+    st.header("The question")
+    st.markdown(
+        "A crack in a painting is **dark AND sunken**. A painted brushstroke is dark but flat, "
+        "so a camera alone is fooled by it. An impasto valley (between ridges of thick paint) is "
+        "sunken but not dark, so a height scanner alone is fooled by it.\n\n"
+        "**Claim tested:** combining an independent height map with the photo removes both kinds "
+        "of false alarm, at the same crack recall."
+    )
     components.html(
         f"""
         <script type="module">
@@ -67,89 +81,81 @@ def page_pipeline() -> None:
         </script>
         <pre class="mermaid">{PIPELINE}</pre>
         """,
-        height=420,
+        height=460,
     )
-    problems = verify_eval_set(EVAL_DIR)
-    if problems:
-        st.error("The evaluation set does not match its manifest: " + "; ".join(problems[:3]))
-    else:
-        st.success(f"Evaluation set verified: {len(_sample_ids())} samples, unchanged since they were built.")
+    for d in (VAL_DIR, EVAL_DIR):
+        problems = verify_eval_set(d)
+        if problems:
+            st.error(f"{d.name} does not match its manifest: " + "; ".join(problems[:3]))
+        else:
+            st.success(f"{d.name}: 30 samples, verified unchanged since they were built.")
 
 
-def page_one_sample() -> None:
-    st.header("One sample, both models")
-    sample_id = st.selectbox("Sample", _sample_ids())
-    sample = load_sample(EVAL_DIR / sample_id)
-    pred_a = predict_colour_only(sample.rgb)
-    pred_b = predict_fused(sample.rgb, sample.height)
+def page_sample() -> None:
+    st.header("One sample, three models")
+    summary = _summary()
+    if summary is None:
+        st.warning("Run `python -m craquelure_fusion.evaluate` first.")
+        return
+    thresholds = summary["thresholds_from_val"]
+    sample = load_sample(EVAL_DIR / st.selectbox("Eval sample", _ids()))
 
     panels = [
-        ("rgb (photo)", sample.rgb),
-        ("height", sample.height),
-        ("answer: crack", sample.crack_mask),
-        ("confuser: stroke", sample.stroke_mask),
-        ("Model A prediction", pred_a),
-        ("Model B prediction", pred_b),
-    ]
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-    for ax, (title, img) in zip(axes.flat, panels):
-        if img.ndim == 2 and img.dtype == bool:
-            ax.imshow(img, cmap="gray")
-        elif img.ndim == 2:
-            ax.imshow(img, cmap="viridis")
-        else:
-            ax.imshow(img)
-        ax.set_title(title)
+        ("photo", sample.rgb, None), ("height", sample.height, "viridis"),
+        ("answer: crack", sample.crack_mask, "gray"),
+        ("confuser: stroke (fools colour)", sample.stroke_mask, "gray"),
+        ("confuser: impasto (fools height)", sample.impasto_mask, "gray"),
+        ("", None, None),
+    ] + [(f"{name} prediction", f(sample) >= thresholds[name], "gray") for name, f in MODELS.items()]
+    fig, axes = plt.subplots(3, 3, figsize=(11, 11))
+    for ax, (title, img, cmap) in zip(axes.flat, panels):
         ax.axis("off")
+        if img is not None:
+            ax.imshow(img, cmap=cmap)
+            ax.set_title(title, fontsize=10)
     fig.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
-
-    col_a, col_b = st.columns(2)
-    for col, name, pred in ((col_a, "Model A (colour only)", pred_a), (col_b, "Model B (colour + height)", pred_b)):
-        precision, recall = tolerant_precision_recall(pred, sample.crack_mask)
-        fa = stroke_false_alarm_rate(pred, sample.crack_mask, sample.stroke_mask)
-        col.metric(f"{name}: stroke false alarms", f"{fa:.0%}")
-        col.caption(f"precision {precision:.2f} · recall {recall:.2f}")
+    st.caption("Cutoffs were chosen on the separate validation set, so every model finds about 90% of the crack.")
 
 
 def page_results() -> None:
-    st.header("Results on the fixed set")
-    if not RESULTS.exists():
-        st.warning(f"Run `python -m craquelure_fusion.evaluate` first. Missing: {RESULTS.name}")
+    st.header("Results on the fixed eval set (30 samples)")
+    summary = _summary()
+    if summary is None:
+        st.warning("Run `python -m craquelure_fusion.evaluate` first.")
         return
-    with open(RESULTS, newline="") as f:
-        rows = list(csv.DictReader(f))
-    models = sorted({r["model"] for r in rows})
-    means = {
-        m: {k: float(np.mean([float(r[k]) for r in rows if r["model"] == m]))
-            for k in ("precision", "recall", "stroke_false_alarm")}
-        for m in models
-    }
-    cols = st.columns(len(models))
-    for col, m in zip(cols, models):
-        col.metric(m, f"{means[m]['stroke_false_alarm']:.0%} stroke false alarms",
-                   f"precision {means[m]['precision']:.2f} · recall {means[m]['recall']:.2f}",
-                   delta_color="off")
-    st.write("Lower stroke false alarms is better. Recall should stay high, or the model is just predicting less.")
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.bar(models, [means[m]["stroke_false_alarm"] for m in models], color=["#b8a88a", "#5b7f5b"])
-    ax.set_ylabel("share of stroke pixels called crack")
-    ax.set_ylim(0, 1)
-    st.pyplot(fig)
-    plt.close(fig)
+    means = summary["means"]
+    cols = st.columns(len(means))
+    for col, (name, m) in zip(cols, means.items()):
+        col.metric(name, f"AP {m['ap']:.2f}")
+        col.caption(f"strokes called crack: {m['stroke_false_alarm']:.0%}  \n"
+                    f"impasto called crack: {m['impasto_false_alarm']:.0%}  \n"
+                    f"recall: {m['recall']:.0%}")
+
+    left, right = st.columns(2)
+    left.image(str(RESULTS / "pr_curves.png"), caption="Precision vs recall at every cutoff")
+    right.image(str(RESULTS / "misregistration.png"), caption="Stress test: misaligned height map")
+
+    st.subheader("Fused minus each single sensor, sample by sample")
+    lines = []
+    for other, comp in summary["fused_vs"].items():
+        for metric, c in comp.items():
+            p = "n/a" if c["wilcoxon_p"] is None else f"{c['wilcoxon_p']:.0e}"
+            lines.append(f"| {other} | {metric} | {c['mean_difference']:+.3f} | "
+                         f"[{c['ci95'][0]:+.3f}, {c['ci95'][1]:+.3f}] | {p} |")
+    st.markdown("| vs | metric | mean difference | 95% interval | Wilcoxon p |\n|---|---|---|---|---|\n"
+                + "\n".join(lines))
+    st.info("Limits: synthetic data with clean, symmetric confusers; a classical detector; "
+            "no real scanner noise yet. The fused AP near 1.0 says the data is easy, not that "
+            "the problem is solved. Next: harder data, a learned model, and a real capture.")
 
 
 def main() -> None:
     st.set_page_config(page_title="Craquelure fusion", layout="wide")
-    st.title("Craquelure fusion: does height stop paint being called crack?")
-    page = st.sidebar.radio("Page", ["Pipeline", "One sample", "Results"])
-    if page == "Pipeline":
-        page_pipeline()
-    elif page == "One sample":
-        page_one_sample()
-    else:
-        page_results()
+    st.title("Does a height map stop paint being called a crack?")
+    page = st.sidebar.radio("Page", ["Question and pipeline", "One sample", "Results"])
+    {"Question and pipeline": page_question, "One sample": page_sample, "Results": page_results}[page]()
 
 
 main()

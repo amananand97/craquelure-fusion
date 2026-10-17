@@ -26,3 +26,6 @@ samples/
 .DS_Store
 __pycache__/
 .pytest_cache/
+
+# study notes stay on the Mac, never in git
+notes/

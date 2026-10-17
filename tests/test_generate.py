@@ -89,3 +89,37 @@ def test_crack_and_stroke_differ_in_height() -> None:
 def test_same_seed_same_sample() -> None:
     a, b = generate_sample(CFG), generate_sample(CFG)
     assert np.array_equal(a.rgb, b.rgb) and np.array_equal(a.height, b.height)
+
+
+# --- v2: the impasto valley (fools height, not colour) ------------------------
+
+V2 = SampleConfig(size=128, seed=1, n_impasto=1)
+
+
+def test_impasto_is_sunken_like_a_crack() -> None:
+    s = generate_sample(V2)
+    impasto_only = s.impasto_mask & ~s.crack_mask
+    crack_only = s.crack_mask & ~s.impasto_mask
+    assert abs(s.height[impasto_only].mean() - s.height[crack_only].mean()) < 0.5 * V2.weave_height
+
+
+def test_impasto_is_not_dark() -> None:
+    s = generate_sample(V2)
+    L = _lightness(s.rgb)
+    impasto_only = s.impasto_mask & ~(s.crack_mask | s.stroke_mask)
+    background = ~(s.crack_mask | s.stroke_mask | s.impasto_mask)
+    assert abs(L[impasto_only].mean() - L[background].mean()) < 0.01
+
+
+def test_v1_settings_reproduce_committed_v1_files(tmp_path: Path) -> None:
+    # Adding impasto must not change a single byte of the v1 data.
+    import csv
+    import hashlib
+
+    manifest = Path(__file__).resolve().parents[1] / "data" / "eval_v1" / "manifest.csv"
+    row = next(csv.DictReader(open(manifest)))
+    from craquelure_fusion.generate import save_sample
+
+    save_sample(generate_sample(SampleConfig(seed=int(row["seed"]))), tmp_path)
+    for name in ("rgb.png", "height.png", "mask.png", "stroke_mask.png"):
+        assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == row[f"sha256_{name}"], name

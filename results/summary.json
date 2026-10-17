@@ -1,0 +1,98 @@
+{
+  "protocol": {
+    "val": "data/val_v2",
+    "eval": "data/eval_v2",
+    "target_recall": 0.9,
+    "tolerance_px": 2,
+    "n_eval_samples": 30
+  },
+  "thresholds_from_val": {
+    "colour_only": 0.7028984427452087,
+    "height_only": 0.961549255485726,
+    "colour_plus_height": 0.8274091954223293
+  },
+  "means": {
+    "colour_only": {
+      "ap": 0.5061733333333333,
+      "precision": 0.48890333333333336,
+      "recall": 0.9548066666666667,
+      "stroke_false_alarm": 0.96083,
+      "impasto_false_alarm": 0.006536666666666666
+    },
+    "height_only": {
+      "ap": 0.48802666666666666,
+      "precision": 0.4811433333333333,
+      "recall": 0.9110166666666667,
+      "stroke_false_alarm": 0.00309,
+      "impasto_false_alarm": 0.9096233333333335
+    },
+    "colour_plus_height": {
+      "ap": 0.99567,
+      "precision": 0.9946300000000001,
+      "recall": 0.9701833333333333,
+      "stroke_false_alarm": 0.00378,
+      "impasto_false_alarm": 0.006216666666666666
+    }
+  },
+  "fused_vs": {
+    "colour_only": {
+      "ap": {
+        "mean_difference": 0.4894966666666666,
+        "ci95": [
+          0.4278541666666667,
+          0.5498434999999999
+        ],
+        "wilcoxon_p": 1.862645149230957e-09
+      },
+      "stroke_false_alarm": {
+        "mean_difference": -0.9570500000000001,
+        "ci95": [
+          -0.992477,
+          -0.9045225833333335
+        ],
+        "wilcoxon_p": 6.04961334931722e-07
+      },
+      "impasto_false_alarm": {
+        "mean_difference": -0.00032,
+        "ci95": [
+          -0.00087,
+          0.0
+        ],
+        "wilcoxon_p": 0.17971249487899976
+      }
+    },
+    "height_only": {
+      "ap": {
+        "mean_difference": 0.5076433333333333,
+        "ci95": [
+          0.45793950000000005,
+          0.5563467499999999
+        ],
+        "wilcoxon_p": 1.862645149230957e-09
+      },
+      "stroke_false_alarm": {
+        "mean_difference": 0.0006900000000000001,
+        "ci95": [
+          -7e-05,
+          0.0016633333333333333
+        ],
+        "wilcoxon_p": 0.14412703481601533
+      },
+      "impasto_false_alarm": {
+        "mean_difference": -0.9034066666666667,
+        "ci95": [
+          -0.9120869166666665,
+          -0.8937465833333333
+        ],
+        "wilcoxon_p": 1.862645149230957e-09
+      }
+    }
+  },
+  "misregistration_fused_ap": {
+    "0": 0.9957677868712974,
+    "1": 0.9943109013588305,
+    "2": 0.9937464095938633,
+    "3": 0.9531932119570398,
+    "4": 0.8881694843503052
+  }
+}

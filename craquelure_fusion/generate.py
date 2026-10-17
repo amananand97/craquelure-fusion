@@ -4,8 +4,10 @@ The rule this whole repo rests on:
     rgb and height are rendered INDEPENDENTLY from the same ground-truth
     geometry (the masks). Height is never computed from the rgb image.
 
-A crack is dark AND sunken. A painted stroke is dark but flat.
-If both look alike in rgb but differ in height, fusion has something to find.
+A crack is dark AND sunken.
+A painted stroke is dark but flat      -> fools a colour-only detector.
+An impasto valley is sunken, not dark  -> fools a height-only detector.
+Only the conjunction (dark AND sunken) separates a crack from both.
 
 Run from the repo root:
     python -m craquelure_fusion.generate --out samples/sample_000 --seed 0
@@ -40,19 +42,21 @@ class SampleConfig:
     line_width_px: float = 3.0     # crack AND stroke share this
     line_darkness: float = 0.55    # fraction of brightness removed inside a line
     crack_depth: float = 12.0      # how far the crack sinks (height units)
+    n_impasto: int = 0             # impasto valleys: sunken, NOT dark (0 = v1 data)
     seed: int = 0
 
 
 @dataclass
 class Sample:
-    rgb: np.ndarray          # (H, W, 3) float32 in [0, 1]
-    height: np.ndarray       # (H, W) float32, height units
-    crack_mask: np.ndarray   # (H, W) bool  -> mask.png (ground truth)
-    stroke_mask: np.ndarray  # (H, W) bool  -> confuser, used for eval later
+    rgb: np.ndarray           # (H, W, 3) float32 in [0, 1]
+    height: np.ndarray        # (H, W) float32, height units
+    crack_mask: np.ndarray    # (H, W) bool -> mask.png (ground truth)
+    stroke_mask: np.ndarray   # (H, W) bool -> confuser that fools COLOUR (dark, flat)
+    impasto_mask: np.ndarray  # (H, W) bool -> confuser that fools HEIGHT (sunken, not dark)
 
 
 # ---------------------------------------------------------------------------
-# Plumbing: written for you. Read it, don't rewrite it.
+# Building blocks
 # ---------------------------------------------------------------------------
 
 def make_canvas(cfg: SampleConfig, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
@@ -113,13 +117,14 @@ def decode_height(encoded: np.ndarray) -> np.ndarray:
 
 
 def save_sample(sample: Sample, out_dir: Path) -> None:
-    """Write rgb.png (8-bit), height.png (16-bit), mask.png and stroke_mask.png (0/255)."""
+    """Write rgb.png (8-bit), height.png (16-bit), mask.png, stroke_mask.png, impasto_mask.png (0/255)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.round(sample.rgb * 255).astype(np.uint8)).save(out_dir / "rgb.png")
     Image.fromarray(encode_height(sample.height)).save(out_dir / "height.png")
     Image.fromarray(sample.crack_mask.astype(np.uint8) * 255).save(out_dir / "mask.png")
     Image.fromarray(sample.stroke_mask.astype(np.uint8) * 255).save(out_dir / "stroke_mask.png")
-    logger.info("Saved rgb, height, mask and stroke_mask to %s", out_dir)
+    Image.fromarray(sample.impasto_mask.astype(np.uint8) * 255).save(out_dir / "impasto_mask.png")
+    logger.info("Saved rgb, height and the three masks to %s", out_dir)
 
 
 def load_sample(in_dir: Path) -> Sample:
@@ -129,7 +134,9 @@ def load_sample(in_dir: Path) -> Sample:
     height = decode_height(np.array(Image.open(in_dir / "height.png")))
     crack = np.array(Image.open(in_dir / "mask.png")) > 0
     stroke = np.array(Image.open(in_dir / "stroke_mask.png")) > 0
-    return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke)
+    impasto_path = in_dir / "impasto_mask.png"  # v1 samples have none
+    impasto = np.array(Image.open(impasto_path)) > 0 if impasto_path.exists() else np.zeros_like(crack)
+    return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke, impasto_mask=impasto)
 
 
 def save_preview(sample: Sample, path: Path) -> None:
@@ -198,14 +205,23 @@ def generate_sample(cfg: SampleConfig) -> Sample:
     # carving the stroke too would make it identical to a crack in both images.
     rgb = paint_line(rgb, stroke, cfg.line_darkness)
 
+    # Impasto valley: sunken exactly like a crack, colour untouched. The mirror of
+    # the stroke: identical to a crack in HEIGHT, so height alone is fooled too.
+    # Drawn AFTER the stroke, so v1 samples (n_impasto=0) use the same random
+    # numbers as before and stay byte-identical.
+    impasto = np.zeros_like(crack)
+    for _ in range(cfg.n_impasto):
+        impasto |= random_path_mask(cfg.size, cfg.line_width_px, rng)
+    height = carve_crack(height, impasto & ~crack, cfg.crack_depth)  # never sink a pixel twice
+
     logger.info(
-        "Sample seed=%d: crack %d px, stroke %d px, overlap %d px",
+        "Sample seed=%d: crack %d px, stroke %d px, impasto %d px",
         cfg.seed,
         crack.sum(),
         stroke.sum(),
-        (crack & stroke).sum(),
+        impasto.sum(),
     )
-    return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke)
+    return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke, impasto_mask=impasto)
 
 
 def main(argv: list[str] | None = None) -> None:

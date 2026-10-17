@@ -1,26 +1,58 @@
 # craquelure-fusion
 
-Does adding a height map stop a painted stroke being mistaken for a crack?
+**Question:** does adding an independent height map stop a crack detector from being fooled?
 
-Synthetic data only (no real scanner data yet). See `notes/` for the study notes.
+A crack in a painting is **dark AND sunken**. Two things imitate half of that:
+
+| | dark in the photo | sunken in height | fools |
+|---|---|---|---|
+| crack | yes | yes | (the target) |
+| painted stroke | yes | no | a colour-only detector |
+| impasto valley | no | yes | a height-only detector |
+
+Only the conjunction separates a crack from both. This repo tests that on synthetic data where the answer is known for every pixel.
+
+## Result (eval set v2, 30 samples, cutoffs chosen on a separate validation set at 90% recall)
+
+| model | AP | strokes called crack | impasto called crack |
+|---|---|---|---|
+| colour only | 0.51 | 96% | 0.7% |
+| height only | 0.49 | 0.3% | 91% |
+| colour + height | 1.00 | 0.4% | 0.6% |
+
+Fused minus each single sensor, paired over the same 30 samples: AP +0.49 (95% CI +0.43 to +0.55) vs colour, +0.51 (+0.46 to +0.56) vs height; Wilcoxon p < 1e-8.
+Stress test: shifting the height map against the photo drops fused AP from 1.00 (0 px) to 0.89 (4 px). Alignment limits fusion.
+
+**Limits, said plainly:** synthetic data with clean, deliberately symmetric confusers; a classical (non-learned) detector; no real sensor noise. AP near 1.0 means the data is easy, not that the problem is solved.
 
 ## Pipeline
 
-1. **Generate** (`craquelure_fusion/generate.py`): one fake painting with a known crack and a painted stroke (the confuser).
-2. **Fixed evaluation set** (`craquelure_fusion/eval_set.py`): 30 samples, seeds 1000 to 1029, saved in `data/eval/` with a checksum manifest.
-3. **Models** (`craquelure_fusion/baseline.py`): Model A (colour only) and Model B (colour + height). Classical, no learning yet.
-4. **Evaluate** (`craquelure_fusion/evaluate.py`, `metrics.py`): tolerant precision and recall, and the stroke false-alarm rate.
-5. **Show** (`app/streamlit_app.py`): the pipeline diagram, one sample, and the results.
+```mermaid
+flowchart LR
+  G[generate.py] --> D[(data/val_v2, data/eval_v2<br/>fixed, checksummed)]
+  D --> M[baseline.py<br/>colour / height / fused scores]
+  M --> E[evaluate.py<br/>cutoff on val, score on eval,<br/>paired stats, shift test]
+  E --> R[(results/)]
+  R --> A[app/streamlit_app.py]
+```
 
-## Run it
+| file | job |
+|---|---|
+| `craquelure_fusion/generate.py` | one synthetic sample: canvas, crack, stroke, impasto; save and load |
+| `craquelure_fusion/eval_set.py` | build and verify the fixed data sets (sha256 manifest; refuses to rebuild in place) |
+| `craquelure_fusion/baseline.py` | three score maps from one detector (black top-hat); fused = geometric mean (AND) |
+| `craquelure_fusion/metrics.py` | tolerant (2 px) precision/recall, PR curve, AP, false-alarm rate per confuser |
+| `craquelure_fusion/evaluate.py` | the experiment protocol and all outputs in `results/` |
+| `app/streamlit_app.py` | presentation: question, one sample, results |
+| `data/eval_v1` | first data set (no impasto), kept for history; shows why v2 was needed |
+
+## Run
 
     pip install -r requirements.txt
-    python -m pytest -q                          # tests
-    python -m craquelure_fusion.eval_set --verify --out data/eval
-    python -m craquelure_fusion.evaluate         # writes results/results.csv
-    streamlit run app/streamlit_app.py           # the presentation
+    python -m pytest -q                                   # 30 tests
+    python -m craquelure_fusion.eval_set --split eval --verify
+    python -m craquelure_fusion.evaluate                  # ~10 s, writes results/
+    streamlit run app/streamlit_app.py
 
-To rebuild the evaluation set from scratch: `python -m craquelure_fusion.eval_set --out data/eval`.
-Do not rebuild it casually: a rebuild with changed settings makes results incomparable.
-
-`practice/` holds exercises and is not part of the test run.
+Fixed sets are never rebuilt in place. A change to the data design gets a new version (`--version`).
+`practice/` holds learning exercises and is not part of the test run.

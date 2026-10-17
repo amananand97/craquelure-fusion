@@ -1,58 +1,55 @@
-"""Classical baseline: no learning. Two detectors and one fusion rule.
+"""Classical baseline: no learning. Each model turns a sample into a SCORE map in [0, 1]
+(higher = more crack-like). Turning scores into yes/no is the evaluation's job, so
+every model is judged at the same recall instead of at a hand-picked cutoff.
 
-Model A (colour only):   finds dark, thin lines in the photo.
-Model B (colour+height): finds dark, thin lines AND sunken, thin valleys in the
-                         height map, and keeps only the pixels both agree on.
-
-Both predict the SAME number of pixels (the top PERCENT_TOP of their score),
-so the comparison is fair: any difference comes from the information, not from
-one model predicting more.
+Three models, one question each:
+    colour   - is it dark and thin?                    (fooled by painted strokes)
+    height   - is it sunken and thin?                  (fooled by impasto valleys)
+    fused    - is it dark AND sunken?                  (should be fooled by neither)
 """
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from scipy import ndimage as ndi
 
-WINDOW_PX = 9       # structures thinner than this (our lines are 3 px) are kept
-PERCENT_TOP = 1.0   # predict the top 1% of pixels as crack
+from craquelure_fusion.generate import Sample
+
+WINDOW_PX = 9  # keeps structures thinner than this; our lines are 3 px wide
 
 
 def black_tophat(image: np.ndarray, window_px: int = WINDOW_PX) -> np.ndarray:
-    """Highlight dark-or-low structures that are thinner than window_px.
+    """Highlight dark-or-low structures thinner than window_px.
 
-    Closing fills in dark thin lines with the brightness around them;
-    subtracting the original leaves exactly those lines, bright in the result.
+    Closing fills thin dark lines with the brightness around them; subtracting
+    the original leaves exactly those lines, bright in the result.
     """
-    closed = ndi.grey_closing(image, size=(window_px, window_px))
-    return closed - image
+    return ndi.grey_closing(image, size=(window_px, window_px)) - image
 
 
 def _normalise(score: np.ndarray) -> np.ndarray:
-    """Scale to 0..1 so two scores can be multiplied fairly."""
+    """Scale to [0, 1] so scores from different sensors can be combined."""
     return score / (score.max() + 1e-8)
 
 
-def _top_percent(score: np.ndarray, percent: float = PERCENT_TOP) -> np.ndarray:
-    """True for the highest-scoring `percent` of pixels."""
-    cutoff = np.percentile(score, 100.0 - percent)
-    return score >= cutoff
+def score_colour(sample: Sample) -> np.ndarray:
+    return _normalise(black_tophat(sample.rgb.mean(axis=-1)))  # mean of R, G, B = lightness
 
 
-def predict_colour_only(rgb: np.ndarray) -> np.ndarray:
-    """Model A. rgb: (H, W, 3) in [0, 1]. Returns (H, W) bool."""
-    darkness = black_tophat(rgb.mean(axis=-1))  # mean over R, G, B = lightness
-    return _top_percent(darkness)
+def score_height(sample: Sample) -> np.ndarray:
+    return _normalise(black_tophat(sample.height))
 
 
-def predict_fused(rgb: np.ndarray, height: np.ndarray) -> np.ndarray:
-    """Model B. Crack = dark AND sunken, combined as a geometric mean.
+def score_fused(sample: Sample) -> np.ndarray:
+    """Geometric mean = AND: high only where BOTH sensors are high.
+    A stroke scores ~0 on height, an impasto valley ~0 on colour, so both drop out."""
+    return np.sqrt(score_colour(sample) * score_height(sample))
 
-    The geometric mean is high only where BOTH scores are high. That is the
-    'AND' in one line: a painted stroke is dark but flat, so its height score
-    is near zero and the product is near zero.
-    """
-    dark = _normalise(black_tophat(rgb.mean(axis=-1)))
-    sunken = _normalise(black_tophat(height))
-    fused = np.sqrt(dark * sunken)
-    return _top_percent(fused)
+
+MODELS: dict[str, Callable[[Sample], np.ndarray]] = {
+    "colour_only": score_colour,
+    "height_only": score_height,
+    "colour_plus_height": score_fused,
+}
