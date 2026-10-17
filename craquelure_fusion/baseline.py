@@ -2,10 +2,13 @@
 (higher = more crack-like). Turning scores into yes/no is the evaluation's job, so
 every model is judged at the same recall instead of at a hand-picked cutoff.
 
-Three models, one question each:
-    colour   - is it dark and thin?                    (fooled by painted strokes)
-    height   - is it sunken and thin?                  (fooled by impasto valleys)
-    fused    - is it dark AND sunken?                  (should be fooled by neither)
+Four models, one question each:
+    colour   - is it dark and thin?             (fooled by painted strokes)
+    height   - is it sunken and thin?           (fooled by impasto valleys)
+    OR       - is it dark OR sunken?            (two sensors, but fooled by both)
+    AND      - is it dark AND sunken?           (should be fooled by neither)
+The OR model is the control that shows having two sensors is not enough:
+how you combine them decides whether the confusers drop out.
 """
 
 from __future__ import annotations
@@ -48,8 +51,14 @@ def score_fused(sample: Sample) -> np.ndarray:
     return np.sqrt(score_colour(sample) * score_height(sample))
 
 
+def score_either(sample: Sample) -> np.ndarray:
+    """Maximum = OR: high where EITHER sensor is high. Keeps both confusers."""
+    return np.maximum(score_colour(sample), score_height(sample))
+
+
 MODELS: dict[str, Callable[[Sample], np.ndarray]] = {
     "colour_only": score_colour,
     "height_only": score_height,
-    "colour_plus_height": score_fused,
+    "colour_or_height": score_either,
+    "colour_and_height": score_fused,
 }

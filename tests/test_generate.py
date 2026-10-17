@@ -111,15 +111,26 @@ def test_impasto_is_not_dark() -> None:
     assert abs(L[impasto_only].mean() - L[background].mean()) < 0.01
 
 
-def test_v1_settings_reproduce_committed_v1_files(tmp_path: Path) -> None:
-    # Adding impasto must not change a single byte of the v1 data.
-    import csv
-    import hashlib
-
-    manifest = Path(__file__).resolve().parents[1] / "data" / "eval_v1" / "manifest.csv"
-    row = next(csv.DictReader(open(manifest)))
+def test_v1_settings_reproduce_committed_v1_pixels(tmp_path: Path) -> None:
+    # Adding impasto must not change a single PIXEL of the v1 data.
+    # Pixels, not file bytes: different Pillow versions compress the same
+    # pixels into different PNG bytes (seen on macOS vs Linux, 17 Oct 2026).
     from craquelure_fusion.generate import save_sample
 
-    save_sample(generate_sample(SampleConfig(seed=int(row["seed"]))), tmp_path)
+    committed = Path(__file__).resolve().parents[1] / "data" / "eval_v1" / "000"
+    save_sample(generate_sample(SampleConfig(seed=1000)), tmp_path)  # sample 000 = seed 1000
     for name in ("rgb.png", "height.png", "mask.png", "stroke_mask.png"):
-        assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == row[f"sha256_{name}"], name
+        fresh = np.array(Image.open(tmp_path / name))
+        stored = np.array(Image.open(committed / name))
+        assert np.array_equal(fresh, stored), name
+
+
+def test_impasto_keeps_apart_from_crack_and_stroke() -> None:
+    from scipy import ndimage as ndi
+
+    from craquelure_fusion.generate import KEEP_APART_PX
+
+    for seed in range(5):
+        s = generate_sample(SampleConfig(size=128, seed=seed, n_impasto=1))
+        dist = ndi.distance_transform_edt(~(s.crack_mask | s.stroke_mask))
+        assert dist[s.impasto_mask].min() > KEEP_APART_PX

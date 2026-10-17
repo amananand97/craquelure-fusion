@@ -48,7 +48,9 @@ def false_alarm_rate(
     """
     near_crack = ndi.distance_transform_edt(~crack) <= tol_px
     only = confuser & ~near_crack
-    if not only.any() or not pred.any():
+    if not only.any():
+        return float("nan")  # no confuser in this sample: undefined, not zero
+    if not pred.any():
         return 0.0
     near_pred = ndi.distance_transform_edt(~pred) <= tol_px
     return float(near_pred[only].mean())
@@ -69,11 +71,13 @@ class PRCurve:
     def threshold_at_recall(self, target: float) -> float:
         """The strictest cutoff that still finds `target` of the cracks."""
         ok = np.nonzero(self.recall >= target)[0]
-        return float(self.thresholds[ok[0]]) if ok.size else float(self.thresholds[-1])
+        if not ok.size:
+            raise ValueError(f"recall {target} is never reached (max {self.recall.max():.3f})")
+        return float(self.thresholds[ok[0]])
 
 
 def tolerant_pr_curve(
-    scores: list[np.ndarray], truths: list[np.ndarray], tol_px: int = TOL_PX, n_thresholds: int = 600
+    scores: list[np.ndarray], truths: list[np.ndarray], tol_px: int = TOL_PX
 ) -> PRCurve:
     """Pooled precision-recall curve over several images, tolerant to tol_px.
 
@@ -81,6 +85,7 @@ def tolerant_pr_curve(
       precision - a pixel scoring >= t is correct if it lies near the truth (fixed per pixel).
       recall    - a crack pixel is found at cutoff t if the HIGHEST score within tol_px of it
                   is >= t. So one maximum filter per image answers recall for every t.
+    Every distinct score is a cutoff, so the curve and AP are exact.
     """
     disk = _disk(tol_px)
     pred_scores, pred_ok, best_near_truth = [], [], []
@@ -96,7 +101,7 @@ def tolerant_pr_curve(
     order = np.argsort(s)
     s_sorted, ok_cum = s[order], np.cumsum(ok[order][::-1])[::-1]  # ok count at or above each rank
 
-    thresholds = np.unique(np.quantile(s, np.linspace(0.80, 1.0, n_thresholds)))[::-1]
+    thresholds = np.unique(s)[::-1]
     first = np.searchsorted(s_sorted, thresholds, side="left")    # first pixel scoring >= t
     n_pred = s.size - first
     n_ok = np.where(first < s.size, ok_cum[np.minimum(first, s.size - 1)], 0)

@@ -2,8 +2,10 @@
 
 Two splits, with seeds that never overlap:
     val   seeds 2000+  -> used to CHOOSE thresholds
-    eval  seeds 1000+  -> used ONLY to report the final numbers
+    eval  seeds 3000+  -> used ONLY to report the final numbers
 Choosing a threshold on the same samples you report would flatter every model.
+Seeds 1000+ were the v1 eval set; the v2 design was made while looking at those
+images, so v2 is reported on seeds nobody has looked at (3000+).
 
 Versions (the data design, not the code):
     v1  crack + painted stroke                  (committed in data/eval_v1, kept for history)
@@ -31,7 +33,7 @@ VERSIONS = {
     "v1": SampleConfig(),
     "v2": SampleConfig(n_impasto=1),
 }
-SEED_START = {"eval": 1000, "val": 2000}
+SEED_START = {"eval": 3000, "val": 2000, "eval_v1": 1000}
 N_SAMPLES = 30
 FILES_PER_SAMPLE = ("rgb.png", "height.png", "mask.png", "stroke_mask.png", "impasto_mask.png")
 MANIFEST = "manifest.csv"
@@ -114,7 +116,7 @@ def verify_eval_set(out_dir: Path) -> list[str]:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Build or verify a fixed data set.")
     parser.add_argument("--version", choices=sorted(VERSIONS), default="v2")
-    parser.add_argument("--split", choices=sorted(SEED_START), default="eval")
+    parser.add_argument("--split", choices=["eval", "val"], default="eval")
     parser.add_argument("--out", type=Path, default=None, help="default: data/<split>_<version>")
     parser.add_argument("--n", type=int, default=N_SAMPLES)
     parser.add_argument("--verify", action="store_true", help="check files against manifest.csv")
@@ -135,7 +137,8 @@ def main(argv: list[str] | None = None) -> None:
     if (out / MANIFEST).exists():
         raise SystemExit(f"{out} already exists. A fixed set is never rebuilt in place; "
                          "delete it on purpose first, or build a new version.")
-    build_eval_set(out, n=args.n, seed_start=SEED_START[args.split], base_cfg=VERSIONS[args.version])
+    seed_start = SEED_START["eval_v1"] if (args.version, args.split) == ("v1", "eval") else SEED_START[args.split]
+    build_eval_set(out, n=args.n, seed_start=seed_start, base_cfg=VERSIONS[args.version])
     print(f"Built {args.n} samples in {out}")
 
 

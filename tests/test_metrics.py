@@ -52,3 +52,20 @@ def test_threshold_at_recall_reaches_target() -> None:
     c = tolerant_pr_curve([score], [truth])
     t = c.threshold_at_recall(0.9)
     assert tolerant_precision_recall(score >= t, truth)[1] >= 0.9
+
+
+def test_false_alarm_is_undefined_without_a_confuser() -> None:
+    import math
+
+    empty = np.zeros((20, 20), dtype=bool)
+    assert math.isnan(false_alarm_rate(_line(3), _line(3), empty))
+
+
+def test_unreachable_recall_raises() -> None:
+    import pytest
+
+    truth = _line(5)
+    c = tolerant_pr_curve([np.zeros((20, 20))], [truth])  # one flat score: recall jumps 0 -> 1
+    c.recall[:] = 0.5  # pretend the curve never gets there
+    with pytest.raises(ValueError):
+        c.threshold_at_recall(0.9)

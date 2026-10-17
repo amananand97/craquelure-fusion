@@ -189,6 +189,24 @@ def carve_crack(height: np.ndarray, mask: np.ndarray, depth: float) -> np.ndarra
     return out
 
 
+KEEP_APART_PX = 4  # a confuser never comes this close to another line
+
+
+def _path_avoiding(taken: np.ndarray, cfg: SampleConfig, rng: np.random.Generator, tries: int = 200) -> np.ndarray:
+    """A new line that stays KEEP_APART_PX away from every line already drawn.
+
+    Why: where a stroke crosses an impasto valley the pixel is dark AND sunken,
+    a crack in every way except its label. Keeping confusers apart means every
+    negative pixel really is 'only one of the two'.
+    """
+    near_taken = ndi.distance_transform_edt(~taken) <= KEEP_APART_PX if taken.any() else taken
+    for _ in range(tries):
+        path = random_path_mask(cfg.size, cfg.line_width_px, rng)
+        if not (path & near_taken).any():
+            return path
+    raise ValueError(f"seed {cfg.seed}: no free room for a confuser after {tries} tries")
+
+
 def generate_sample(cfg: SampleConfig) -> Sample:
     """Build one sample: canvas + one crack + one painted stroke."""
     rng = np.random.default_rng(cfg.seed)
@@ -211,8 +229,8 @@ def generate_sample(cfg: SampleConfig) -> Sample:
     # numbers as before and stay byte-identical.
     impasto = np.zeros_like(crack)
     for _ in range(cfg.n_impasto):
-        impasto |= random_path_mask(cfg.size, cfg.line_width_px, rng)
-    height = carve_crack(height, impasto & ~crack, cfg.crack_depth)  # never sink a pixel twice
+        impasto |= _path_avoiding(crack | stroke | impasto, cfg, rng)
+    height = carve_crack(height, impasto, cfg.crack_depth)
 
     logger.info(
         "Sample seed=%d: crack %d px, stroke %d px, impasto %d px",
