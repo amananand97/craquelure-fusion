@@ -181,7 +181,13 @@ def _results_section(results: list[StepResult]) -> None:
     if ctx is None:
         st.caption("Press **Run pipeline** to compute them.")
         return
-    if by_key["measure"].status != "passed":
+    measure = by_key["measure"]
+    # Measured to the end: every model has its numbers and its comparison with AND.
+    complete = bool(ctx.means) and len(ctx.comparisons) == len(ctx.means) - 1
+    if measure.status == "failed" and complete:
+        st.error(f"**The measure check failed:** {measure.error}. This is a finding, not a crash: "
+                 "every number below was computed; the check names what fell short.")
+    elif measure.status != "passed":
         failed = next((r for r in results if r.status == "failed"), None)
         st.warning(f"No results: {_plain(failed.title) if failed else 'a step'} failed. "
                    "Every result depends on the steps before it, so nothing after a failure is trusted.")
@@ -277,9 +283,9 @@ def _results_section(results: list[StepResult]) -> None:
     st.caption(f"Cutoff fixed at 0 px on validation ({ctx.thresholds[FUSED]:.2f}). "
                "Watch the white mask lose its shape as the height map drifts.")
 
-    st.info("Limits: synthetic data where each confuser copies a crack exactly in one sensor, so an "
-            "agreement rule is bound to win; a classical detector; no real sensor noise. "
-            "The point shown is the mechanism, not real-world accuracy.")
+    st.info("Limits: synthetic data only. The U-Nets were trained on the same generator as these samples "
+            "(on other seeds), so a near-perfect score says the task is learnable, not that the model works "
+            "on real paintings. The point shown is the mechanism, not real-world accuracy.")
 
 
 @st.fragment(run_every=3)

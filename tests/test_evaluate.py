@@ -10,7 +10,7 @@ from craquelure_fusion.generate import SampleConfig
 
 
 def test_experiment_runs_end_to_end(tmp_path: Path) -> None:
-    cfg = SampleConfig(size=64, n_impasto=1)
+    cfg = SampleConfig(size=96)
     val = build_eval_set(tmp_path / "val", n=3, seed_start=2000, base_cfg=cfg)
     ev = build_eval_set(tmp_path / "eval", n=3, seed_start=3000, base_cfg=cfg)
     # Classical models only: the test checks the protocol, not whichever checkpoints are on disk.

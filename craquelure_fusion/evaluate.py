@@ -1,5 +1,5 @@
 """The experiment. Run:
-    python -m craquelure_fusion.evaluate --version v3
+    python -m craquelure_fusion.evaluate
 
 Protocol (decided before looking at eval numbers):
   1. For each model, choose the cutoff on the VALIDATION set: the strictest cutoff
@@ -16,7 +16,7 @@ Models: the four classical baselines, plus each U-Net checkpoint found in
 checkpoints/ (unet_3ch.pt = photo only, unet_4ch.pt = photo + height).
 The U-Nets were trained on seeds 10000+, so they never see the val or eval sets.
 
-Outputs in results/<v>/: per_sample.csv, summary.json, pr_curves.png, misregistration.png
+Outputs in results/: per_sample.csv, summary.json, pr_curves.png, misregistration.png
 """
 
 from __future__ import annotations
@@ -139,7 +139,7 @@ def pooled_ap(eval_set: Split, models: Models, eval_scores: Scores) -> dict[str,
 
 
 def save_plots(eval_set: Split, models: Models, eval_scores: Scores, mis: dict,
-               out_dir: Path, eval_dir_name: str = "eval") -> None:
+               out_dir: Path, eval_dir_name: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -205,14 +205,10 @@ def run(val_dir: Path, eval_dir: Path, out_dir: Path, models: Models | None = No
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the experiment on the fixed sets.")
-    parser.add_argument("--version", default="v2", help="data version: reads data/val_<v>, data/eval_<v>")
-    parser.add_argument("--val", type=Path, default=None)
-    parser.add_argument("--eval", type=Path, default=None)
-    parser.add_argument("--out", type=Path, default=None, help="default: results/ for v2, results/<v>/ otherwise")
+    parser.add_argument("--val", type=Path, default=Path("data/val"))
+    parser.add_argument("--eval", type=Path, default=Path("data/eval"))
+    parser.add_argument("--out", type=Path, default=Path("results"))
     args = parser.parse_args(argv)
-    args.val = args.val or Path(f"data/val_{args.version}")
-    args.eval = args.eval or Path(f"data/eval_{args.version}")
-    args.out = args.out or (Path("results") if args.version == "v2" else Path("results") / args.version)
     logging.basicConfig(level=logging.WARNING)
 
     s = run(args.val, args.eval, args.out)

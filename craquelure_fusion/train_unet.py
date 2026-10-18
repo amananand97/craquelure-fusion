@@ -1,4 +1,4 @@
-"""Train a U-Net on freshly generated v3 samples. Run:
+"""Train a U-Net on freshly generated samples. Run:
     python -m craquelure_fusion.train_unet --channels photo+height --steps 2000 --out checkpoints/unet_4ch.pt
 
 Training samples are generated on the fly from seeds TRAIN_SEED_START and up. They are
@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from craquelure_fusion.generate_hard import HardConfig, generate_hard_sample
+from craquelure_fusion.generate import SampleConfig, generate_sample
 from craquelure_fusion.unet import UNet, dice_bce_loss, make_input, pick_device
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def train(cfg: TrainConfig, out: Path | None = None) -> list[float]:
     for step in range(cfg.steps):
         samples = []
         for _ in range(cfg.batch):
-            samples.append(generate_hard_sample(HardConfig(seed=next_seed)))
+            samples.append(generate_sample(SampleConfig(seed=next_seed)))
             next_seed += 1
         xs, ys = _crop_batch(samples, rng, cfg.crop)
         x = torch.from_numpy(np.stack(xs)).to(device)
@@ -98,14 +98,14 @@ def train(cfg: TrainConfig, out: Path | None = None) -> list[float]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description="Train a U-Net on v3 samples.")
+    p = argparse.ArgumentParser(description="Train a U-Net on generated samples.")
     p.add_argument("--channels", choices=["photo", "photo+height"], default="photo+height")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     # one line per training sample would bury the terminal: keep only the every-50-steps lines
-    logging.getLogger("craquelure_fusion.generate_hard").setLevel(logging.WARNING)
+    logging.getLogger("craquelure_fusion.generate").setLevel(logging.WARNING)
     cfg = TrainConfig(use_height=args.channels == "photo+height", steps=args.steps)
     train(cfg, args.out)
 

@@ -8,7 +8,7 @@ import pytest
 from craquelure_fusion.eval_set import FILES_PER_SAMPLE, build_eval_set, main, verify_eval_set
 from craquelure_fusion.generate import SampleConfig
 
-SMALL = SampleConfig(size=64, n_impasto=1)
+SMALL = SampleConfig(size=96)
 
 
 def test_builds_every_file_for_every_sample(tmp_path: Path) -> None:
@@ -35,7 +35,7 @@ def test_changed_file_is_reported(tmp_path: Path) -> None:
 
 def test_committed_sets_are_unchanged() -> None:
     data = Path(__file__).resolve().parents[1] / "data"
-    for name in ("eval_v1", "eval_v2", "val_v2", "eval_v3", "val_v3"):
+    for name in ("val", "eval"):
         assert verify_eval_set(data / name) == [], name
 
 

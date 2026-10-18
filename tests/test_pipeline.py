@@ -41,10 +41,23 @@ def unet_done(monkeypatch):
     monkeypatch.setattr(pipeline, "STEPS", stubbed)
 
 
-def test_clean_run_passes_every_step_once_phase_3_is_done(unet_done) -> None:
+def test_clean_run_stops_at_the_impasto_finding(unet_done) -> None:
+    # On this data AND-fusion leaks on impasto (the valleys carry a little shadow), so the
+    # false-alarm check fails. That is the finding: everything before it passes, and the
+    # numbers are still computed in full for the page to show.
     results, ctx = run_pipeline(DATA)
-    assert [r.status for r in results] == ["passed"] * len(STEPS)
+    by_key = {r.key: r for r in results}
+    assert all(by_key[k].status == "passed" for k in ("gen", "rebuild", "check", "load", "score", "unet", "cutoffs"))
+    assert by_key["measure"].status == "failed" and "impasto" in by_key["measure"].error
+    assert by_key["stress"].status == "skipped"
     assert ctx.means["colour_and_height"]["ap"] > 0.9
+    assert len(ctx.comparisons) == len(ctx.means) - 1
+
+
+def test_misalignment_fails_the_ap_check_not_just_the_impasto_limit(unet_done) -> None:
+    results, _ = run_pipeline(DATA, "misaligned_6px")
+    measure = next(r for r in results if r.key == "measure")
+    assert measure.status == "failed" and "not clearly better" in measure.error
 
 
 @pytest.mark.parametrize("fault", sorted(FAULTS))
@@ -62,7 +75,7 @@ def test_faults_never_touch_committed_data(unet_done) -> None:
     from craquelure_fusion.eval_set import verify_eval_set
 
     run_pipeline(DATA, "tampered_file")
-    assert verify_eval_set(DATA / "eval_v2") == []
+    assert verify_eval_set(DATA / "eval") == []
 
 
 def test_crash_location_points_into_our_code() -> None:
@@ -87,5 +100,5 @@ def test_generate_and_rebuild_steps_pass_on_clean_data(unet_done) -> None:
 def test_each_step_records_what_it_did(unet_done) -> None:
     results, _ = run_pipeline(DATA)
     for r in results:
-        if r.status != "held":  # held steps did not run, so they have nothing to record
+        if r.status not in ("held", "skipped"):  # these did not run, so they have nothing to record
             assert r.log, f"step {r.key} recorded nothing"

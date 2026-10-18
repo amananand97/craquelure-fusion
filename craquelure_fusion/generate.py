@@ -1,13 +1,23 @@
-"""Procedural generator for ONE synthetic craquelure sample.
+"""Procedural generator for synthetic craquelure samples, plus saving and loading.
 
 The rule this whole repo rests on:
-    rgb and height are rendered INDEPENDENTLY from the same ground-truth
-    geometry (the masks). Height is never computed from the rgb image.
+    the photo (rgb) and the height map are rendered INDEPENDENTLY from the same
+    ground-truth geometry (the masks). Height is never computed from the photo.
 
 A crack is dark AND sunken.
-A painted stroke is dark but flat      -> fools a colour-only detector.
-An impasto valley is sunken, not dark  -> fools a height-only detector.
-Only the conjunction (dark AND sunken) separates a crack from both.
+A painted stroke is dark and slightly raised  -> fools a colour-only detector.
+An impasto valley is sunken with raised rims  -> fools a height-only detector.
+
+Realism, so the task is not trivially separable:
+  cracks    V-shaped (deepest at the centre), darkness varies per crack
+  strokes   paint has thickness, so a stroke sits a little higher than the canvas
+  impasto   raised rims either side, and a little shadow in the valley
+  darkness  cracks and strokes draw their darkness from the same range
+  sensors   each adds its own noise; the height map is shifted up to 1.5 px
+
+Ground truth stays in PHOTO coordinates: the masks mark where things are in the
+image; the height map is the sensor that is slightly misaligned, as in real scans.
+Every random draw comes from one generator seeded by cfg.seed: same seed, same sample.
 
 Run from the repo root:
     python -m craquelure_fusion.generate --out samples/sample_000 --seed 0
@@ -31,18 +41,36 @@ logger = logging.getLogger(__name__)
 # height in every sample we ever generate.
 HEIGHT_RANGE: tuple[float, float] = (-32.0, 32.0)
 
+KEEP_APART_PX = 4   # a line never comes this close to another line
+RIM_PX = 2.0        # width of the raised paint ridge on each side of an impasto valley
+WALK_STEPS = 400    # length of the random walk that traces a line
+WALK_TURN_STD = 0.08  # how much the walk turns per step (radians)
+MAX_TRIES = 300     # attempts to place a line before giving up on a seed
+
+Range = tuple[float, float]
+
 
 @dataclass(frozen=True)
 class SampleConfig:
-    """Every knob for one sample. Same config + same seed = same sample."""
+    """Every knob is a (low, high) range; each sample draws its own value."""
 
     size: int = 256
-    weave_period_px: float = 6.0   # canvas thread spacing
-    weave_height: float = 1.0      # canvas bump amplitude (height units)
-    line_width_px: float = 3.0     # crack AND stroke share this
-    line_darkness: float = 0.55    # fraction of brightness removed inside a line
-    crack_depth: float = 12.0      # how far the crack sinks (height units)
-    n_impasto: int = 0             # impasto valleys: sunken, NOT dark (0 = v1 data)
+    weave_period_px: float = 6.0
+    weave_height: float = 1.0
+    n_cracks: tuple[int, int] = (1, 2)
+    n_strokes: tuple[int, int] = (1, 2)
+    n_impasto: tuple[int, int] = (1, 2)
+    width_px: Range = (2.0, 4.0)
+    crack_darkness: Range = (0.35, 0.65)
+    stroke_darkness: Range = (0.35, 0.65)
+    crack_depth: Range = (5.0, 12.0)      # at the centreline; V-shaped across the crack
+    impasto_depth: Range = (5.0, 12.0)    # flat-bottomed valley
+    impasto_rim: Range = (1.0, 3.0)       # height of the ridges either side
+    impasto_shadow: Range = (0.0, 0.25)   # valleys read slightly darker in the photo
+    stroke_raise: Range = (0.3, 1.5)      # paint sits on top: a stroke is a little higher
+    height_noise: Range = (0.3, 1.2)      # std, height units
+    rgb_noise: Range = (0.005, 0.02)      # std, relative brightness
+    misregister_px: Range = (0.0, 1.5)    # height map shifted against the photo
     seed: int = 0
 
 
@@ -55,35 +83,9 @@ class Sample:
     impasto_mask: np.ndarray  # (H, W) bool -> confuser that fools HEIGHT (sunken, not dark)
 
 
-# ---------------------------------------------------------------------------
-# Building blocks
-# ---------------------------------------------------------------------------
+# --- generating -------------------------------------------------------------------
 
-def make_canvas(cfg: SampleConfig, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    """Blank primed canvas: returns (rgb, height).
-
-    The weave is physical, so BOTH sensors see it. Each gets its own
-    independent noise, which is what two real instruments would give you.
-    """
-    y, x = np.mgrid[0 : cfg.size, 0 : cfg.size].astype(np.float32)
-    k = 2 * np.pi / cfg.weave_period_px
-    weave = np.sin(k * x) * np.sin(k * y)  # [-1, 1], the world's geometry
-
-    height = cfg.weave_height * weave + rng.normal(0, 0.1 * cfg.weave_height, weave.shape)
-
-    ground = np.array([0.93, 0.89, 0.80], dtype=np.float32)  # warm off-white
-    shade = 1.0 + 0.03 * weave + rng.normal(0, 0.01, weave.shape)
-    rgb = np.clip(ground[None, None, :] * shade[..., None], 0.0, 1.0)
-
-    return rgb.astype(np.float32), height.astype(np.float32)
-
-
-def random_path_distance(
-    size: int,
-    rng: np.random.Generator,
-    n_steps: int = 400,
-    turn_std: float = 0.08,
-) -> np.ndarray:
+def random_path_distance(size: int, rng: np.random.Generator) -> np.ndarray:
     """Random walk -> distance (px) from every pixel to the walked centreline.
 
     Thresholding the distance gives a line of any width; using the distance itself
@@ -93,8 +95,8 @@ def random_path_distance(
     angle = rng.uniform(0, 2 * np.pi)
     centreline = np.zeros((size, size), dtype=bool)
 
-    for _ in range(n_steps):
-        angle += rng.normal(0, turn_std)
+    for _ in range(WALK_STEPS):
+        angle += rng.normal(0, WALK_TURN_STD)
         pos += np.array([np.cos(angle), np.sin(angle)])
         row, col = int(round(pos[1])), int(round(pos[0]))
         if not (0 <= row < size and 0 <= col < size):
@@ -104,16 +106,83 @@ def random_path_distance(
     return ndi.distance_transform_edt(~centreline)
 
 
-def random_path_mask(
-    size: int,
-    width_px: float,
-    rng: np.random.Generator,
-    n_steps: int = 400,
-    turn_std: float = 0.08,
-) -> np.ndarray:
-    """A thin wandering line as a boolean mask (random walk, then thickened)."""
-    return random_path_distance(size, rng, n_steps, turn_std) <= width_px / 2
+def _draw(rng: np.random.Generator, r: Range) -> float:
+    return float(rng.uniform(r[0], r[1]))
 
+
+def _line_avoiding(taken: np.ndarray, width: float, size: int, rng: np.random.Generator, seed: int) -> np.ndarray:
+    """Distance-to-centreline map of a new line that keeps KEEP_APART_PX from every
+    line already drawn (incl. impasto rims). Overlaps would make a pixel two things."""
+    near_taken = ndi.distance_transform_edt(~taken) <= KEEP_APART_PX + RIM_PX if taken.any() else taken
+    for _ in range(MAX_TRIES):
+        dist = random_path_distance(size, rng)
+        if not ((dist <= width / 2 + RIM_PX) & near_taken).any():
+            return dist
+    raise ValueError(f"seed {seed}: no free room for another line after {MAX_TRIES} tries")
+
+
+def generate_sample(cfg: SampleConfig) -> Sample:
+    rng = np.random.default_rng(cfg.seed)
+    n = cfg.size
+
+    # canvas: the weave is real geometry, seen by both sensors
+    y, x = np.mgrid[0:n, 0:n].astype(np.float32)
+    k = 2 * np.pi / cfg.weave_period_px
+    weave = np.sin(k * x) * np.sin(k * y)
+    height = cfg.weave_height * weave
+    ground = np.array([0.93, 0.89, 0.80], dtype=np.float32)
+    rgb = np.clip(ground[None, None, :] * (1.0 + 0.03 * weave)[..., None], 0, 1)
+
+    crack = np.zeros((n, n), bool)
+    stroke = np.zeros((n, n), bool)
+    impasto = np.zeros((n, n), bool)
+    taken = np.zeros((n, n), bool)
+
+    def new_line() -> tuple[np.ndarray, float]:
+        width = _draw(rng, cfg.width_px)
+        dist = _line_avoiding(taken, width, n, rng, cfg.seed)
+        return dist, width
+
+    for _ in range(int(rng.integers(cfg.n_cracks[0], cfg.n_cracks[1] + 1))):
+        dist, w = new_line()
+        core = dist <= w / 2
+        rgb[core] *= 1 - _draw(rng, cfg.crack_darkness)
+        depth = _draw(rng, cfg.crack_depth)
+        height[core] -= depth * (1 - dist[core] / (w / 2))  # V: deepest on the centreline
+        crack |= core
+        taken |= core
+
+    for _ in range(int(rng.integers(cfg.n_strokes[0], cfg.n_strokes[1] + 1))):
+        dist, w = new_line()
+        core = dist <= w / 2
+        rgb[core] *= 1 - _draw(rng, cfg.stroke_darkness)
+        height[core] += _draw(rng, cfg.stroke_raise)  # paint on top: slightly raised
+        stroke |= core
+        taken |= core
+
+    for _ in range(int(rng.integers(cfg.n_impasto[0], cfg.n_impasto[1] + 1))):
+        dist, w = new_line()
+        core = dist <= w / 2
+        rim = (dist > w / 2) & (dist <= w / 2 + RIM_PX)
+        height[core] -= _draw(rng, cfg.impasto_depth)
+        height[rim] += _draw(rng, cfg.impasto_rim)
+        rgb[core] *= 1 - _draw(rng, cfg.impasto_shadow)  # a little shadow in the valley
+        impasto |= core
+        taken |= core | rim
+
+    # sensors: each adds its own noise; the height scanner is slightly misaligned
+    height = height + rng.normal(0, _draw(rng, cfg.height_noise), (n, n))
+    rgb = np.clip(rgb * (1 + rng.normal(0, _draw(rng, cfg.rgb_noise), (n, n)))[..., None], 0, 1)
+    shift_len, shift_dir = _draw(rng, cfg.misregister_px), rng.uniform(0, 2 * np.pi)
+    height = ndi.shift(height, (shift_len * np.sin(shift_dir), shift_len * np.cos(shift_dir)), order=1, mode="nearest")
+
+    logger.info("Sample seed=%d: crack %d px, stroke %d px, impasto %d px, shift %.2f px",
+                cfg.seed, crack.sum(), stroke.sum(), impasto.sum(), shift_len)
+    return Sample(rgb=rgb.astype(np.float32), height=height.astype(np.float32),
+                  crack_mask=crack, stroke_mask=stroke, impasto_mask=impasto)
+
+
+# --- saving and loading -----------------------------------------------------------
 
 def encode_height(height: np.ndarray) -> np.ndarray:
     """float height -> uint16 using the FIXED HEIGHT_RANGE."""
@@ -146,8 +215,7 @@ def load_sample(in_dir: Path) -> Sample:
     height = decode_height(np.array(Image.open(in_dir / "height.png")))
     crack = np.array(Image.open(in_dir / "mask.png")) > 0
     stroke = np.array(Image.open(in_dir / "stroke_mask.png")) > 0
-    impasto_path = in_dir / "impasto_mask.png"  # v1 samples have none
-    impasto = np.array(Image.open(impasto_path)) > 0 if impasto_path.exists() else np.zeros_like(crack)
+    impasto = np.array(Image.open(in_dir / "impasto_mask.png")) > 0
     return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke, impasto_mask=impasto)
 
 
@@ -172,86 +240,6 @@ def save_preview(sample: Sample, path: Path) -> None:
     fig.savefig(path, dpi=120)
     plt.close(fig)
     logger.info("Saved preview to %s", path)
-
-
-# ---------------------------------------------------------------------------
-# Marking the surface: the three decisions that make the data honest.
-# ---------------------------------------------------------------------------
-
-def paint_line(rgb: np.ndarray, mask: np.ndarray, darkness: float) -> np.ndarray:
-    """Darken rgb inside `mask` by `darkness` (0 = no change, 1 = black).
-
-    Called for BOTH the crack and the stroke. That shared call is why the two
-    look alike in colour: same function, same darkness, same width.
-
-    Must return a NEW array. The input must be unchanged afterwards.
-    """
-    out = rgb.copy()
-    out[mask] *= (1 - darkness)  # (H, W, 3) array, masked pixels only
-    return out
-
-
-def carve_crack(height: np.ndarray, mask: np.ndarray, depth: float) -> np.ndarray:
-    """Sink the surface by `depth` inside `mask`. Flat-bottomed for v1.
-
-    Must return a NEW array. The input must be unchanged afterwards.
-    """
-    out = height.copy()
-    out[mask] -= depth  # (H, W) array, masked pixels only
-    return out
-
-
-KEEP_APART_PX = 4  # a confuser never comes this close to another line
-
-
-def _path_avoiding(taken: np.ndarray, cfg: SampleConfig, rng: np.random.Generator, tries: int = 200) -> np.ndarray:
-    """A new line that stays KEEP_APART_PX away from every line already drawn.
-
-    Why: where a stroke crosses an impasto valley the pixel is dark AND sunken,
-    a crack in every way except its label. Keeping confusers apart means every
-    negative pixel really is 'only one of the two'.
-    """
-    near_taken = ndi.distance_transform_edt(~taken) <= KEEP_APART_PX if taken.any() else taken
-    for _ in range(tries):
-        path = random_path_mask(cfg.size, cfg.line_width_px, rng)
-        if not (path & near_taken).any():
-            return path
-    raise ValueError(f"seed {cfg.seed}: no free room for a confuser after {tries} tries")
-
-
-def generate_sample(cfg: SampleConfig) -> Sample:
-    """Build one sample: canvas + one crack + one painted stroke."""
-    rng = np.random.default_rng(cfg.seed)
-
-    rgb, height = make_canvas(cfg, rng)
-    crack = random_path_mask(cfg.size, cfg.line_width_px, rng)
-    stroke = random_path_mask(cfg.size, cfg.line_width_px, rng)
-
-    # Crack: dark AND sunken.
-    rgb = paint_line(rgb, crack, cfg.line_darkness)
-    height = carve_crack(height, crack, cfg.crack_depth)
-
-    # Stroke: dark, flat. Paint sits on top, so only the colour changes;
-    # carving the stroke too would make it identical to a crack in both images.
-    rgb = paint_line(rgb, stroke, cfg.line_darkness)
-
-    # Impasto valley: sunken exactly like a crack, colour untouched. The mirror of
-    # the stroke: identical to a crack in HEIGHT, so height alone is fooled too.
-    # Drawn AFTER the stroke, so v1 samples (n_impasto=0) use the same random
-    # numbers as before and stay byte-identical.
-    impasto = np.zeros_like(crack)
-    for _ in range(cfg.n_impasto):
-        impasto |= _path_avoiding(crack | stroke | impasto, cfg, rng)
-    height = carve_crack(height, impasto, cfg.crack_depth)
-
-    logger.info(
-        "Sample seed=%d: crack %d px, stroke %d px, impasto %d px",
-        cfg.seed,
-        crack.sum(),
-        stroke.sum(),
-        impasto.sum(),
-    )
-    return Sample(rgb=rgb, height=height, crack_mask=crack, stroke_mask=stroke, impasto_mask=impasto)
 
 
 def main(argv: list[str] | None = None) -> None:

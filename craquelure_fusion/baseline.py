@@ -20,16 +20,16 @@ from scipy import ndimage as ndi
 
 from craquelure_fusion.generate import Sample
 
-WINDOW_PX = 9  # keeps structures thinner than this; our lines are 3 px wide
+WINDOW_PX = 9  # keeps structures thinner than this; our lines are 2-4 px wide
 
 
-def black_tophat(image: np.ndarray, window_px: int = WINDOW_PX) -> np.ndarray:
-    """Highlight dark-or-low structures thinner than window_px.
+def black_tophat(image: np.ndarray) -> np.ndarray:
+    """Highlight dark-or-low structures thinner than WINDOW_PX.
 
     Closing fills thin dark lines with the brightness around them; subtracting
     the original leaves exactly those lines, bright in the result.
     """
-    return ndi.grey_closing(image, size=(window_px, window_px)) - image
+    return ndi.grey_closing(image, size=(WINDOW_PX, WINDOW_PX)) - image
 
 
 def _normalise(score: np.ndarray) -> np.ndarray:

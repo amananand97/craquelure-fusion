@@ -50,7 +50,9 @@ def test_a_learned_model_beating_and_is_reported_not_gated() -> None:
     pipeline._cutoffs(ctx)
     logs: list[str] = []
     ctx.say = logs.append
-    pipeline._measure(ctx)  # must not raise
+    # The only failure allowed is the impasto finding on the classical AND rule, never the U-Net.
+    with pytest.raises(pipeline.CheckFailed, match="impasto"):
+        pipeline._measure(ctx)
     assert "unet_fake" in ctx.comparisons
     assert any("reported, not gated: unet_fake" in line for line in logs)
 

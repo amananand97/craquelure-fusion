@@ -1,4 +1,4 @@
-"""The experiment as six named steps, so it can be run, watched, and broken on purpose.
+"""The experiment as nine named steps in four phases, so it can be run, watched, and broken on purpose.
 
 Each step has: plain-language lines saying what it does, where its code lives, a
 pass condition, and a check. A failed check or a crash stops the run there; later
@@ -75,7 +75,7 @@ class Step:
     code: str
     passes_if: str
     run: Callable[[Context], str]
-    group: str = ""
+    group: str
 
 
 @dataclass
@@ -90,14 +90,14 @@ class StepResult:
     log: list[str] = field(default_factory=list)  # what the step did, line by line, as it happens
 
 
-# --- the six steps -------------------------------------------------------------
+# --- the steps ------------------------------------------------------------------
 
 def _generate(ctx: Context) -> str:
-    from craquelure_fusion.generate_hard import HardConfig, generate_hard_sample
+    from craquelure_fusion.generate import SampleConfig, generate_sample
 
-    a = generate_hard_sample(HardConfig(seed=3000))
-    ctx.say("generating seed 3000 (recipe v3)")
-    b = generate_hard_sample(HardConfig(seed=3000))
+    ctx.say("generating seed 3000 twice")
+    a = generate_sample(SampleConfig(seed=3000))
+    b = generate_sample(SampleConfig(seed=3000))
     if not (np.array_equal(a.rgb, b.rgb) and np.array_equal(a.height, b.height)):
         raise CheckFailed("the same seed made two different samples: the generator is not reproducible")
     if not a.crack_mask.any():
@@ -108,29 +108,27 @@ def _generate(ctx: Context) -> str:
 
 
 def _rebuild(ctx: Context) -> str:
-    """Regenerate the first 3 samples of each v2 and v3 evaluation set and compare pixels.
+    """Regenerate the first 3 evaluation samples from their seeds and compare pixels.
 
     Pixels, not file bytes: the same pixels can be compressed to different PNG bytes on
     different machines, so a byte comparison would fail for the wrong reason."""
-    from dataclasses import replace
-
-    from craquelure_fusion.eval_set import SEED_START, VERSIONS, make_sample
-    from craquelure_fusion.generate import encode_height, decode_height, load_sample
+    from craquelure_fusion.eval_set import SEED_START
+    from craquelure_fusion.generate import SampleConfig, decode_height, encode_height, generate_sample, load_sample
 
     compared = 0
-    for version in ("v2", "v3"):
-        for i in range(3):
-            stored = load_sample(ctx.data_dir / f"eval_{version}" / f"{i:03d}")
-            fresh = make_sample(replace(VERSIONS[version], seed=SEED_START["eval"] + i))
-            same = (np.array_equal(np.round(fresh.rgb * 255) / 255, stored.rgb)
-                    and np.array_equal(decode_height(encode_height(fresh.height)), stored.height)
-                    and np.array_equal(fresh.crack_mask, stored.crack_mask)
-                    and np.array_equal(fresh.stroke_mask, stored.stroke_mask)
-                    and np.array_equal(fresh.impasto_mask, stored.impasto_mask))
-            if not same:
-                raise CheckFailed(f"eval_{version} sample {i:03d} no longer rebuilds to the stored pixels")
-            compared += 1
-            ctx.say(f"eval_{version} sample {i:03d}: rebuilt from seed {SEED_START['eval'] + i}, pixels match")
+    for i in range(3):
+        seed = SEED_START["eval"] + i
+        stored = load_sample(ctx.data_dir / "eval" / f"{i:03d}")
+        fresh = generate_sample(SampleConfig(seed=seed))
+        same = (np.array_equal(np.round(fresh.rgb * 255) / 255, stored.rgb)
+                and np.array_equal(decode_height(encode_height(fresh.height)), stored.height)
+                and np.array_equal(fresh.crack_mask, stored.crack_mask)
+                and np.array_equal(fresh.stroke_mask, stored.stroke_mask)
+                and np.array_equal(fresh.impasto_mask, stored.impasto_mask))
+        if not same:
+            raise CheckFailed(f"eval sample {i:03d} no longer rebuilds to the stored pixels")
+        compared += 1
+        ctx.say(f"eval sample {i:03d}: rebuilt from seed {seed}, pixels match")
     return f"rebuilt {compared} stored samples from their seeds; pixels identical"
 
 
@@ -173,10 +171,10 @@ def _unet(ctx: Context) -> str:
 
 
 def _check_data(ctx: Context) -> str:
-    sets = [ctx.data_dir / "val_v2", ctx.data_dir / "eval_v2"]
+    sets = [ctx.data_dir / "val", ctx.data_dir / "eval"]
     with tempfile.TemporaryDirectory() as tmp:
         if ctx.fault == "tampered_file":  # tamper with a COPY, never the real data
-            copy = Path(tmp) / "eval_v2"
+            copy = Path(tmp) / "eval"
             shutil.copytree(sets[1], copy)
             (copy / "007" / "mask.png").write_bytes(b"not a png any more")
             sets[1] = copy
@@ -185,14 +183,14 @@ def _check_data(ctx: Context) -> str:
         ctx.say(f"{d.name}: fingerprints checked")
     if problems:
         kind, path = problems[0].split(" ", 1)
-        short = "/".join(Path(path).parts[-3:])  # e.g. eval_v2/007/mask.png
+        short = "/".join(Path(path).parts[-3:])  # e.g. eval/007/mask.png
         raise CheckFailed(f"{len(problems)} file(s) do not match their fingerprint: {kind} {short}")
     return "60 samples, every file matches its fingerprint"
 
 
 def _load(ctx: Context) -> str:
-    ctx.val = load_split(ctx.data_dir / "val_v2")
-    ctx.eval_set = load_split(ctx.data_dir / "eval_v2")
+    ctx.val = load_split(ctx.data_dir / "val")
+    ctx.eval_set = load_split(ctx.data_dir / "eval")
     if ctx.fault == "height_sensor_off":
         ctx.val = [(i, replace(s, height=np.zeros_like(s.height))) for i, s in ctx.val]
         ctx.eval_set = [(i, replace(s, height=np.zeros_like(s.height))) for i, s in ctx.eval_set]
@@ -266,7 +264,7 @@ def _measure(ctx: Context) -> str:
         fa = fused[f"{confuser}_false_alarm"]
         if fa > FALSE_ALARM_LIMIT:
             raise CheckFailed(f"AND-fusion calls {fa:.0%} of {confuser} pixels crack "
-                              f"(limit {FALSE_ALARM_LIMIT:.0%}); the two sensors no longer agree on where things are")
+                              f"(limit {FALSE_ALARM_LIMIT:.0%})")
     return (f"AND-fusion AP {fused['ap']:.2f}, false alarms: strokes {fused['stroke_false_alarm']:.0%}, "
             f"impasto {fused['impasto_false_alarm']:.0%}")
 
@@ -286,16 +284,16 @@ GROUPS = ("Phase 1 · Make the data", "Phase 2 · Check the data", "Phase 3 · S
 
 STEPS: tuple[Step, ...] = (
     Step("gen", "1 · Generate one sample",
-         ("The recipe (v3): V-shaped cracks, raised paint strokes, impasto valleys with rims, noise, misalignment.",
+         ("The recipe: V-shaped cracks, raised paint strokes, impasto valleys with rims, noise, misalignment.",
           "Generate seed 3000 twice.",
           "Same seed must give the same pixels; this is what makes every number repeatable."),
-         "generate_hard.py · generate_hard_sample", "same seed, same pixels; the sample contains a crack",
+         "generate.py · generate_sample", "same seed, same pixels; the sample contains a crack",
          _generate, GROUPS[0]),
     Step("rebuild", "2 · Rebuild stored samples",
-         ("The stored evaluation sets were built from seeds. Rebuild the first 3 samples of v2 and of v3.",
+         ("The stored evaluation set was built from seeds. Rebuild its first 3 samples.",
           "Compare pixels with what is stored on disk.",
           "Pixels, not file bytes: PNG bytes can differ between computers for identical pixels."),
-         "eval_set.py · make_sample, generate.py · load_sample", "every rebuilt sample matches its stored pixels",
+         "generate.py · generate_sample, load_sample", "every rebuilt sample matches its stored pixels",
          _rebuild, GROUPS[0]),
     Step("check", "3 · Check the fixed data",
          ("Two fixed sets: 30 validation samples choose settings, 30 evaluation samples report results.",
