@@ -1,5 +1,5 @@
 """The experiment. Run:
-    python -m craquelure_fusion.evaluate
+    python -m craquelure_fusion.evaluate --version v3
 
 Protocol (decided before looking at eval numbers):
   1. For each model, choose the cutoff on the VALIDATION set: the strictest cutoff
@@ -12,7 +12,11 @@ Protocol (decided before looking at eval numbers):
      p-value (with n=30, its floor is 1.9e-9: it only says 'every sample agreed').
   4. Stress test: shift the height map 0-4 px against the photo, both directions.
 
-Outputs in results/: per_sample.csv, summary.json, pr_curves.png, misregistration.png
+Models: the four classical baselines, plus each U-Net checkpoint found in
+checkpoints/ (unet_3ch.pt = photo only, unet_4ch.pt = photo + height).
+The U-Nets were trained on seeds 10000+, so they never see the val or eval sets.
+
+Outputs in results/<v>/: per_sample.csv, summary.json, pr_curves.png, misregistration.png
 """
 
 from __future__ import annotations
@@ -21,13 +25,14 @@ import argparse
 import csv
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 from scipy import stats
 
-from craquelure_fusion.baseline import MODELS
+from craquelure_fusion.baseline import MODELS as CLASSICAL
 from craquelure_fusion.generate import Sample, load_sample
 from craquelure_fusion.metrics import false_alarm_rate, tolerant_pr_curve, tolerant_precision_recall
 
@@ -37,9 +42,25 @@ TARGET_RECALL = 0.90
 FUSED = "colour_and_height"
 SHIFTS_PX = (0, 1, 2, 3, 4)
 METRICS = ("ap", "precision", "recall", "stroke_false_alarm", "impasto_false_alarm")
+CHECKPOINTS = {"unet_3ch": Path("checkpoints/unet_3ch.pt"), "unet_4ch": Path("checkpoints/unet_4ch.pt")}
 
 Split = list[tuple[str, Sample]]
+Scorer = Callable[[Sample], np.ndarray]
+Models = dict[str, Scorer]
 Scores = dict[str, list[np.ndarray]]
+
+
+def default_models(checkpoints: dict[str, Path] = CHECKPOINTS) -> Models:
+    """Classical baselines, plus every U-Net whose checkpoint exists."""
+    from craquelure_fusion.learned import load_scorer  # imports torch: only when needed
+
+    models: Models = dict(CLASSICAL)
+    for name, path in checkpoints.items():
+        if path.exists():
+            models[name] = load_scorer(path)
+        else:
+            logger.warning("no checkpoint at %s; %s not evaluated", path, name)
+    return models
 
 
 def load_split(split_dir: Path) -> Split:
@@ -47,23 +68,24 @@ def load_split(split_dir: Path) -> Split:
     return [(d.name, load_sample(d)) for d in dirs]
 
 
-def score_all(split: Split) -> Scores:
+def score_all(split: Split, models: Models) -> Scores:
     """Every model's score map for every sample, computed once and reused."""
-    return {name: [f(s) for _, s in split] for name, f in MODELS.items()}
+    return {name: [f(s) for _, s in split] for name, f in models.items()}
 
 
-def choose_thresholds(val: Split, val_scores: Scores | None = None) -> dict[str, float]:
-    val_scores = val_scores or score_all(val)
+def choose_thresholds(val: Split, models: Models, val_scores: Scores | None = None) -> dict[str, float]:
+    val_scores = val_scores or score_all(val, models)
     truths = [s.crack_mask for _, s in val]
     return {name: tolerant_pr_curve(val_scores[name], truths).threshold_at_recall(TARGET_RECALL)
-            for name in MODELS}
+            for name in models}
 
 
-def per_sample_rows(eval_set: Split, thresholds: dict[str, float], eval_scores: Scores | None = None) -> list[dict]:
-    eval_scores = eval_scores or score_all(eval_set)
+def per_sample_rows(eval_set: Split, models: Models, thresholds: dict[str, float],
+                    eval_scores: Scores | None = None) -> list[dict]:
+    eval_scores = eval_scores or score_all(eval_set, models)
     rows = []
     for i, (sample_id, s) in enumerate(eval_set):
-        for name in MODELS:
+        for name in models:
             score = eval_scores[name][i]
             pred = score >= thresholds[name]
             precision, recall = tolerant_precision_recall(pred, s.crack_mask)
@@ -79,10 +101,10 @@ def per_sample_rows(eval_set: Split, thresholds: dict[str, float], eval_scores: 
     return rows
 
 
-def means(rows: list[dict]) -> dict[str, dict[str, float]]:
+def means(rows: list[dict], models: Models) -> dict[str, dict[str, float]]:
     """Per model, the mean of each metric over samples (NaN = undefined for that sample, skipped)."""
     return {m: {k: float(np.nanmean([r[k] for r in rows if r["model"] == m])) for k in METRICS}
-            for m in MODELS}
+            for m in models}
 
 
 def paired_comparison(rows: list[dict], a: str, b: str, metric: str) -> dict:
@@ -98,25 +120,26 @@ def paired_comparison(rows: list[dict], a: str, b: str, metric: str) -> dict:
     return {**out, "ci95": [float(ci.low), float(ci.high)], "wilcoxon_p": float(stats.wilcoxon(diff).pvalue)}
 
 
-def misregistration(eval_set: Split) -> dict[str, dict[str, float]]:
+def misregistration(eval_set: Split, models: Models) -> dict[str, dict[str, float]]:
     """Pooled AP of every model when the height map is shifted by k px (photo stays put)."""
     truths = [s.crack_mask for _, s in eval_set]
     out: dict[str, dict[str, float]] = {}
     for axis_name, axis in (("horizontal", 1), ("vertical", 0)):
         for k in SHIFTS_PX:
             shifted = [replace(s, height=np.roll(s.height, k, axis=axis)) for _, s in eval_set]
-            for name, f in MODELS.items():
+            for name, f in models.items():
                 ap = tolerant_pr_curve([f(s) for s in shifted], truths).average_precision
                 out.setdefault(f"{name}/{axis_name}", {})[str(k)] = ap
     return out
 
 
-def pooled_ap(eval_set: Split, eval_scores: Scores) -> dict[str, float]:
+def pooled_ap(eval_set: Split, models: Models, eval_scores: Scores) -> dict[str, float]:
     truths = [s.crack_mask for _, s in eval_set]
-    return {name: tolerant_pr_curve(eval_scores[name], truths).average_precision for name in MODELS}
+    return {name: tolerant_pr_curve(eval_scores[name], truths).average_precision for name in models}
 
 
-def save_plots(eval_set: Split, eval_scores: Scores, mis: dict, out_dir: Path, eval_dir_name: str = "eval") -> None:
+def save_plots(eval_set: Split, models: Models, eval_scores: Scores, mis: dict,
+               out_dir: Path, eval_dir_name: str = "eval") -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -124,19 +147,19 @@ def save_plots(eval_set: Split, eval_scores: Scores, mis: dict, out_dir: Path, e
 
     truths = [s.crack_mask for _, s in eval_set]
     fig, ax = plt.subplots(figsize=(5.5, 4.5))
-    for name in MODELS:
+    for name in models:
         c = tolerant_pr_curve(eval_scores[name], truths)
         ax.plot(c.recall, c.precision, label=f"{name} (pooled AP {c.average_precision:.2f})")
     ax.axvline(TARGET_RECALL, color="grey", ls=":", lw=1)
     ax.set(xlabel="recall (cracks found)", ylabel="precision (predictions that are cracks)",
            xlim=(0, 1.02), ylim=(0, 1.02), title=f"{eval_dir_name}: all samples pooled, tolerance 2 px")
-    ax.legend(loc="lower left", fontsize=8)
+    ax.legend(loc="lower left", fontsize=7)
     fig.tight_layout()
     fig.savefig(out_dir / "pr_curves.png", dpi=130)
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(5.5, 3.6))
-    for name in MODELS:
+    for name in models:
         for axis_name, style in (("horizontal", "-"), ("vertical", "--")):
             series = mis[f"{name}/{axis_name}"]
             ax.plot([int(k) for k in series], list(series.values()), style, marker="o", ms=3,
@@ -149,12 +172,13 @@ def save_plots(eval_set: Split, eval_scores: Scores, mis: dict, out_dir: Path, e
     plt.close(fig)
 
 
-def run(val_dir: Path, eval_dir: Path, out_dir: Path) -> dict:
+def run(val_dir: Path, eval_dir: Path, out_dir: Path, models: Models | None = None) -> dict:
+    models = models or default_models()
     val, eval_set = load_split(val_dir), load_split(eval_dir)
-    thresholds = choose_thresholds(val)
-    eval_scores = score_all(eval_set)
-    rows = per_sample_rows(eval_set, thresholds, eval_scores)
-    mis = misregistration(eval_set)
+    thresholds = choose_thresholds(val, models)
+    eval_scores = score_all(eval_set, models)
+    rows = per_sample_rows(eval_set, models, thresholds, eval_scores)
+    mis = misregistration(eval_set, models)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "per_sample.csv", "w", newline="") as f:
@@ -164,18 +188,18 @@ def run(val_dir: Path, eval_dir: Path, out_dir: Path) -> dict:
 
     summary = {
         "protocol": {"val": str(val_dir), "eval": str(eval_dir), "target_recall": TARGET_RECALL,
-                     "tolerance_px": 2, "n_eval_samples": len(eval_set),
+                     "tolerance_px": 2, "n_eval_samples": len(eval_set), "models": list(models),
                      "ap_note": "means = mean of per-sample AP; pooled_ap = all samples in one curve"},
         "thresholds_from_val": thresholds,
-        "means": means(rows),
-        "pooled_ap": pooled_ap(eval_set, eval_scores),
+        "means": means(rows, models),
+        "pooled_ap": pooled_ap(eval_set, models, eval_scores),
         "fused_vs": {other: {k: paired_comparison(rows, other, FUSED, k)
                              for k in ("ap", "stroke_false_alarm", "impasto_false_alarm")}
-                     for other in MODELS if other != FUSED},
+                     for other in models if other != FUSED},
         "misregistration_pooled_ap": mis,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    save_plots(eval_set, eval_scores, mis, out_dir, eval_dir.name)
+    save_plots(eval_set, models, eval_scores, mis, out_dir, eval_dir.name)
     return summary
 
 

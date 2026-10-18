@@ -19,9 +19,11 @@ EXPECTED_FAILURE = {
 }
 
 
-def test_waiting_phase_pauses_the_run_and_holds_later_phases() -> None:
-    # No U-Net checkpoints yet: phase 3 waits, so phase 4 must not run.
-    results, _ = run_pipeline(DATA)
+def test_waiting_phase_pauses_the_run_and_holds_later_phases(tmp_path: Path) -> None:
+    # No U-Net checkpoints beside this data: phase 3 waits, so phase 4 must not run.
+    # The data is linked into a folder with no checkpoints/, so the result does not depend on what is trained.
+    (tmp_path / "data").symlink_to(DATA)
+    results, _ = run_pipeline(tmp_path / "data")
     by_key = {r.key: r.status for r in results}
     assert all(by_key[k] == "passed" for k in ("gen", "rebuild", "check", "load", "score"))
     assert by_key["unet"] == "waiting"

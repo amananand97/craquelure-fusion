@@ -37,6 +37,9 @@ FAULTS = {
 
 FALSE_ALARM_LIMIT = 0.05
 SHIFT_BUDGET_PX = 2  # AND-fusion must hold AP >= 0.9 up to this misalignment
+# The thesis: AND must beat each single-sensor rule and OR. The U-Nets are reported beside it, not gated:
+# a learned model beating the hand rule is a finding to show, not a failure of the pipeline.
+GATED_RIVALS = ("colour_only", "height_only", "colour_or_height")
 
 
 class CheckFailed(Exception):
@@ -51,6 +54,7 @@ class Context:
     eval_set: Split = field(default_factory=list)
     val_scores: dict = field(default_factory=dict)
     eval_scores: dict = field(default_factory=dict)
+    models: dict = field(default_factory=dict)  # name -> scorer: classical, plus U-Nets once trained
     thresholds: dict = field(default_factory=dict)
     rows: list = field(default_factory=list)
     means: dict = field(default_factory=dict)
@@ -151,7 +155,21 @@ def _unet(ctx: Context) -> str:
             ctx.say(f"{name}: training not started, or started without progress logging")
     if not ready:
         raise NotReady("U-Net still training (live progress is shown above)")
-    return "both U-Net checkpoints found"
+    from craquelure_fusion.learned import load_scorer
+
+    for name in ("unet_3ch", "unet_4ch"):
+        scorer = load_scorer(ckpt / f"{name}.pt")
+        ctx.models[name] = scorer
+        for store, split in ((ctx.val_scores, ctx.val), (ctx.eval_scores, ctx.eval_set)):
+            store[name] = [scorer(s) for _, s in split]
+            for (sample_id, s), score in zip(split, store[name]):
+                if score.shape != s.crack_mask.shape:
+                    raise CheckFailed(f"{name} returned a {score.shape} map for a {s.crack_mask.shape} "
+                                      f"sample ({sample_id})")
+                if not (score.min() >= 0 and score.max() <= 1 + 1e-6):
+                    raise CheckFailed(f"{name} scores leave the 0-1 range on sample {sample_id}")
+        ctx.say(f"{name}: loaded, scored {len(ctx.val)} validation and {len(ctx.eval_set)} evaluation samples")
+    return "both U-Nets loaded and scored every pixel"
 
 
 def _check_data(ctx: Context) -> str:
@@ -203,6 +221,7 @@ def _score(ctx: Context) -> str:
     if ctx.fault == "model_bug":  # a realistic bug: an off-by-a-few crop inside a model
         colour = models["colour_only"]
         models["colour_only"] = lambda s: colour(s)[:-6, :]
+    ctx.models = dict(models)
     for split, store in ((ctx.val, ctx.val_scores), (ctx.eval_set, ctx.eval_scores)):
         for name, f in models.items():
             store[name] = [f(s) for _, s in split]
@@ -218,7 +237,7 @@ def _score(ctx: Context) -> str:
 
 def _cutoffs(ctx: Context) -> str:
     try:
-        ctx.thresholds = choose_thresholds(ctx.val, ctx.val_scores)
+        ctx.thresholds = choose_thresholds(ctx.val, ctx.models, ctx.val_scores)
     except ValueError as e:
         raise CheckFailed(str(e)) from e
     for k, v in ctx.thresholds.items():
@@ -227,14 +246,19 @@ def _cutoffs(ctx: Context) -> str:
 
 
 def _measure(ctx: Context) -> str:
-    ctx.rows = per_sample_rows(ctx.eval_set, ctx.thresholds, ctx.eval_scores)
-    ctx.means = means(ctx.rows)
+    ctx.rows = per_sample_rows(ctx.eval_set, ctx.models, ctx.thresholds, ctx.eval_scores)
+    ctx.means = means(ctx.rows, ctx.models)
     ctx.comparisons = {other: {k: paired_comparison(ctx.rows, other, FUSED, k)
                                for k in ("ap", "stroke_false_alarm", "impasto_false_alarm")}
-                       for other in MODELS if other != FUSED}
+                       for other in ctx.models if other != FUSED}
     ctx.say(f"measured {len(ctx.eval_set)} unseen samples with the cutoffs above")
+    for other in ctx.models:
+        if other not in GATED_RIVALS and other != FUSED:
+            ctx.say(f"reported, not gated: {other} AP {ctx.means[other]['ap']:.3f} "
+                    f"(AND {ctx.means[FUSED]['ap']:.3f})")
     fused = ctx.means[FUSED]
-    for other, comp in ctx.comparisons.items():
+    for other in GATED_RIVALS:
+        comp = ctx.comparisons[other]
         if comp["ap"]["ci95"][0] <= 0:
             raise CheckFailed(f"AND-fusion is not clearly better than {other}: AP difference "
                               f"{comp['ap']['mean_difference']:+.2f}, interval includes 0")
@@ -293,7 +317,7 @@ STEPS: tuple[Step, ...] = (
          ("A small neural network learns the crack rule from freshly generated training samples.",
           "Two versions: photo only, and photo plus height map.",
           "Trained on seeds 10000+, which the evaluation never sees."),
-         "unet.py · UNet, train_unet.py", "both checkpoints exist and load (waits until they are trained)",
+         "unet.py · UNet, train_unet.py", "both checkpoints load and score every pixel (waits until they are trained)",
          _unet, GROUPS[2]),
     Step("cutoffs", "7 · Choose cutoffs (validation only)",
          ("A score becomes yes/no at a cutoff.",
@@ -306,7 +330,7 @@ STEPS: tuple[Step, ...] = (
           "Measure AP, cracks found, strokes called crack, impasto called crack.",
           "Compare AND with every other model sample by sample, with 95% intervals."),
          "evaluate.py · per_sample_rows, paired_comparison",
-         f"AND beats every model on AP (interval above 0) with under {FALSE_ALARM_LIMIT:.0%} false alarms",
+         f"AND beats colour-only, height-only and OR on AP (interval above 0), under {FALSE_ALARM_LIMIT:.0%} false alarms; U-Nets reported",
          _measure, GROUPS[3]),
     Step("stress", "9 · Stress test: alignment",
          ("Real scanners never line the photo and height map up perfectly.",
