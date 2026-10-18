@@ -9,7 +9,9 @@ never written to disk, and their seeds never overlap the validation (2000+) or e
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +49,13 @@ def _crop_batch(samples, rng: np.random.Generator, crop: int):
     return xs, ys
 
 
+def _write_progress(out: Path, step: int, steps: int, loss: float, seeds_used: int, state: str) -> None:
+    """Small file the page reads to show live training progress: <name>.progress.json next to the checkpoint."""
+    progress = out.with_suffix(".progress.json")
+    progress.write_text(json.dumps({"step": step, "steps": steps, "loss": float(loss), "seeds_used": seeds_used,
+                                    "state": state, "updated": time.strftime("%H:%M:%S")}))
+
+
 def train(cfg: TrainConfig, out: Path | None = None) -> list[float]:
     torch.manual_seed(cfg.seed)
     rng = np.random.default_rng(cfg.seed)
@@ -76,11 +85,14 @@ def train(cfg: TrainConfig, out: Path | None = None) -> list[float]:
         losses.append(float(loss.detach()))
         if step % 50 == 0 or step == cfg.steps - 1:
             logger.info("step %d/%d  loss %.4f  (device %s)", step, cfg.steps, losses[-1], device)
+        if out is not None and (step % 10 == 0 or step == cfg.steps - 1):
+            _write_progress(out, step + 1, cfg.steps, losses[-1], next_seed - TRAIN_SEED_START, "training")
 
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"state_dict": model.state_dict(), "config": cfg.__dict__, "train_seeds": [TRAIN_SEED_START, next_seed]}, out)
         logger.info("saved checkpoint to %s (trained on seeds %d-%d)", out, TRAIN_SEED_START, next_seed - 1)
+        _write_progress(out, cfg.steps, cfg.steps, losses[-1], next_seed - TRAIN_SEED_START, "done")
     return losses
 
 

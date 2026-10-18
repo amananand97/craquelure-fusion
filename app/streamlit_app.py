@@ -8,6 +8,7 @@ Run from the repo root:
 from __future__ import annotations
 
 import html
+import json
 import sys
 from pathlib import Path
 
@@ -26,9 +27,9 @@ from craquelure_fusion.metrics import tolerant_pr_curve  # noqa: E402
 from craquelure_fusion.pipeline import FAULTS, STEPS, StepResult, run_pipeline  # noqa: E402
 
 DATA = ROOT / "data"
-COLOURS = {"pending": "#b8b8b8", "running": "#d49a00", "passed": "#2e7d32", "failed": "#c62828", "skipped": "#b8b8b8", "waiting": "#6d6d9e"}
-ICONS = {"pending": "○", "running": "◔", "passed": "✓", "failed": "✗", "skipped": "–", "waiting": "⧗"}
-LABELS = {"pending": "not run", "running": "running…", "passed": "passed", "failed": "failed", "skipped": "skipped", "waiting": "waiting"}
+COLOURS = {"pending": "#b8b8b8", "running": "#d49a00", "passed": "#2e7d32", "failed": "#c62828", "skipped": "#b8b8b8", "waiting": "#6d6d9e", "held": "#8a8a8a"}
+ICONS = {"pending": "○", "running": "◔", "passed": "✓", "failed": "✗", "skipped": "–", "waiting": "⧗", "held": "⏸"}
+LABELS = {"pending": "not run", "running": "running…", "passed": "passed", "failed": "failed", "skipped": "skipped", "waiting": "waiting", "held": "held"}
 NICE = {"colour_only": "Colour only", "height_only": "Height only",
         "colour_or_height": "Colour OR height", "colour_and_height": "Colour AND height"}
 
@@ -47,7 +48,7 @@ def _results() -> list[StepResult]:
 def _box_css(results: list[StepResult]) -> None:
     rules = []
     for r in results:
-        style = "dashed" if r.status in ("skipped", "waiting") else "solid"
+        style = "dashed" if r.status in ("skipped", "waiting", "held") else "solid"
         width = "3px" if r.status in ("passed", "failed", "running") else "2px"
         rules.append(f".st-key-step_{r.key} {{ border: {width} {style} {COLOURS[r.status]} !important; "
                      f"border-radius: 12px; padding: 0.9rem 1rem; min-height: 165px; }}")
@@ -60,7 +61,7 @@ def _live_grid_html(results: list[StepResult]) -> str:
     for r in results:
         c = COLOURS[r.status]
         style = "dashed" if r.status == "skipped" else "solid"
-        detail = html.escape(r.summary or r.error or LABELS[r.status])
+        detail = html.escape(r.log[-1] if r.status == "running" and r.log else (r.summary or r.error or LABELS[r.status]))
         cells.append(
             f"<div style='border:3px {style} {c};border-radius:12px;padding:14px;min-height:120px'>"
             f"<div style='font-weight:600'>{html.escape(r.title)}</div>"
@@ -87,7 +88,9 @@ def _grid_row(results: list[StepResult], row: list) -> None:
             timing = f" · {r.seconds:.1f} s" if r.status in ("passed", "failed") else ""
             st.markdown(f"<span style='color:{COLOURS[r.status]};font-weight:600'>"
                         f"{ICONS[r.status]} {LABELS[r.status]}{timing}</span>", unsafe_allow_html=True)
-            if r.summary:
+            if r.status == "running" and r.log:
+                st.caption(f"now: {r.log[-1]}")
+            elif r.summary:
                 st.caption(r.summary)
             if r.error:
                 st.caption(f":red[{r.error}]")
@@ -179,6 +182,29 @@ def _results_section(results: list[StepResult]) -> None:
             "The point shown is the mechanism, not real-world accuracy.")
 
 
+@st.fragment(run_every=3)
+def _live_training() -> None:
+    """U-Net training, read from the progress files every 3 seconds (no button press needed)."""
+    ckpt = DATA.parent / "checkpoints"
+    st.subheader("Live: U-Net training")
+    any_run = False
+    for name, label in (("unet_3ch", "photo only (3 channels)"), ("unet_4ch", "photo + height (4 channels)")):
+        if (ckpt / f"{name}.pt").exists():
+            st.markdown(f"**{label}:** finished, checkpoint saved")
+            continue
+        prog = ckpt / f"{name}.progress.json"
+        if not prog.exists():
+            st.markdown(f"**{label}:** not started (or started before progress logging)")
+            continue
+        any_run = True
+        p = json.loads(prog.read_text())
+        st.markdown(f"**{label}:** step {p['step']} of {p['steps']} · loss {p['loss']:.4f} · "
+                    f"{p['seeds_used']} fresh training samples so far · updated {p['updated']}")
+        st.progress(min(p["step"] / p["steps"], 1.0))
+    if not any_run:
+        st.caption("No training running. Checkpoints appear here as they finish.")
+
+
 # --- page ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -210,13 +236,14 @@ def main() -> None:
         st.session_state.update(results=results, ctx=ctx, fault=fault)
         st.rerun()
 
+    _live_training()
     results = _results()
     done = sum(r.status in ("passed", "failed", "waiting") for r in results)
     failed = next((r for r in results if r.status == "failed"), None)
     waiting = [_plain(r.title) for r in results if r.status == "waiting"]
     text = ("not run yet" if done == 0 else
             f"stopped: {_plain(failed.title)} failed" if failed else
-            f"all runnable steps passed · waiting: {', '.join(waiting)}" if waiting else "all steps passed")
+            f"paused: waiting for {', '.join(waiting)}" if waiting else "all steps passed")
     progress_slot.progress(done / len(results), text=f"{done} of {len(results)} steps · {text}")
     with grid_slot.container():
         _interactive_grid(results)

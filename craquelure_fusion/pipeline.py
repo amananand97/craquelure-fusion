@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import time
 import traceback
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
@@ -55,6 +56,7 @@ class Context:
     means: dict = field(default_factory=dict)
     comparisons: dict = field(default_factory=dict)
     shifts: dict = field(default_factory=dict)
+    say: Callable[[str], None] = field(default=lambda msg: None)  # a step reports what it is doing
 
 
 class NotReady(Exception):
@@ -76,11 +78,12 @@ class Step:
 class StepResult:
     key: str
     title: str
-    status: str = "pending"  # pending | running | passed | failed | skipped | waiting
+    status: str = "pending"  # pending | running | passed | failed | skipped | waiting | held
     summary: str = ""
     error: str = ""
     where: list[str] = field(default_factory=list)  # file:line in function, outermost first
     seconds: float = 0.0
+    log: list[str] = field(default_factory=list)  # what the step did, line by line, as it happens
 
 
 # --- the six steps -------------------------------------------------------------
@@ -89,11 +92,13 @@ def _generate(ctx: Context) -> str:
     from craquelure_fusion.generate_hard import HardConfig, generate_hard_sample
 
     a = generate_hard_sample(HardConfig(seed=3000))
+    ctx.say("generating seed 3000 (recipe v3)")
     b = generate_hard_sample(HardConfig(seed=3000))
     if not (np.array_equal(a.rgb, b.rgb) and np.array_equal(a.height, b.height)):
         raise CheckFailed("the same seed made two different samples: the generator is not reproducible")
     if not a.crack_mask.any():
         raise CheckFailed("the generated sample has no crack in it")
+    ctx.say(f"generated twice: identical pixels, {int(a.crack_mask.sum())} crack pixels")
     return (f"seed 3000 makes a sample with {int(a.crack_mask.sum())} crack pixels; "
             "generating it twice gives identical pixels")
 
@@ -121,16 +126,32 @@ def _rebuild(ctx: Context) -> str:
             if not same:
                 raise CheckFailed(f"eval_{version} sample {i:03d} no longer rebuilds to the stored pixels")
             compared += 1
+            ctx.say(f"eval_{version} sample {i:03d}: rebuilt from seed {SEED_START['eval'] + i}, pixels match")
     return f"rebuilt {compared} stored samples from their seeds; pixels identical"
 
 
 def _unet(ctx: Context) -> str:
-    """Score with the trained U-Nets. Waits until checkpoints exist (slice 3)."""
+    """Score with the trained U-Nets. Waits until both checkpoints exist; reports live training progress."""
     ckpt = ctx.data_dir.parent / "checkpoints"
-    missing = [n for n in ("unet_3ch.pt", "unet_4ch.pt") if not (ckpt / n).exists()]
-    if missing:
-        raise NotReady("no trained U-Net yet (checkpoints arrive in slice 3)")
-    return "U-Net checkpoints found"
+    ready = True
+    for name in ("unet_3ch", "unet_4ch"):
+        if (ckpt / f"{name}.pt").exists():
+            ctx.say(f"{name}: checkpoint saved")
+            continue
+        ready = False
+        prog = ckpt / f"{name}.progress.json"
+        if prog.exists():
+            p = json.loads(prog.read_text())
+            if p.get("state") == "done":
+                ctx.say(f"{name}: training finished, checkpoint not yet written")
+            else:
+                ctx.say(f"{name}: training step {p['step']}/{p['steps']}, loss {p['loss']:.4f}, "
+                        f"{p['seeds_used']} fresh training samples so far (at {p['updated']})")
+        else:
+            ctx.say(f"{name}: training not started, or started without progress logging")
+    if not ready:
+        raise NotReady("U-Net still training (live progress is shown above)")
+    return "both U-Net checkpoints found"
 
 
 def _check_data(ctx: Context) -> str:
@@ -142,6 +163,8 @@ def _check_data(ctx: Context) -> str:
             (copy / "007" / "mask.png").write_bytes(b"not a png any more")
             sets[1] = copy
         problems = [p for d in sets for p in verify_eval_set(d)]
+    for d in sets:
+        ctx.say(f"{d.name}: fingerprints checked")
     if problems:
         kind, path = problems[0].split(" ", 1)
         short = "/".join(Path(path).parts[-3:])  # e.g. eval_v2/007/mask.png
@@ -159,6 +182,7 @@ def _load(ctx: Context) -> str:
         ctx.val = [(i, replace(s, height=np.roll(s.height, 6, axis=1))) for i, s in ctx.val]
         ctx.eval_set = [(i, replace(s, height=np.roll(s.height, 6, axis=1))) for i, s in ctx.eval_set]
 
+    ctx.say(f"loaded {len(ctx.val)} validation and {len(ctx.eval_set)} evaluation samples from disk")
     for split_name, split in (("val", ctx.val), ("eval", ctx.eval_set)):
         for sample_id, s in split:
             shapes = {s.rgb.shape[:2], s.height.shape, s.crack_mask.shape, s.stroke_mask.shape, s.impasto_mask.shape}
@@ -182,6 +206,7 @@ def _score(ctx: Context) -> str:
     for split, store in ((ctx.val, ctx.val_scores), (ctx.eval_set, ctx.eval_scores)):
         for name, f in models.items():
             store[name] = [f(s) for _, s in split]
+            ctx.say(f"{name}: scored {len(split)} samples")
             for (sample_id, s), score in zip(split, store[name]):
                 if score.shape != s.crack_mask.shape:
                     raise CheckFailed(f"{name} returned a {score.shape} map for a {s.crack_mask.shape} "
@@ -196,6 +221,8 @@ def _cutoffs(ctx: Context) -> str:
         ctx.thresholds = choose_thresholds(ctx.val, ctx.val_scores)
     except ValueError as e:
         raise CheckFailed(str(e)) from e
+    for k, v in ctx.thresholds.items():
+        ctx.say(f"{k}: cutoff {v:.2f} keeps {TARGET_RECALL:.0%} of validation cracks")
     return "cutoffs at 90% recall: " + ", ".join(f"{k} {v:.2f}" for k, v in ctx.thresholds.items())
 
 
@@ -205,6 +232,7 @@ def _measure(ctx: Context) -> str:
     ctx.comparisons = {other: {k: paired_comparison(ctx.rows, other, FUSED, k)
                                for k in ("ap", "stroke_false_alarm", "impasto_false_alarm")}
                        for other in MODELS if other != FUSED}
+    ctx.say(f"measured {len(ctx.eval_set)} unseen samples with the cutoffs above")
     fused = ctx.means[FUSED]
     for other, comp in ctx.comparisons.items():
         if comp["ap"]["ci95"][0] <= 0:
@@ -224,12 +252,13 @@ def _stress(ctx: Context) -> str:
     for k in range(0, 5):
         shifted = [replace(s, height=np.roll(s.height, k, axis=1)) for _, s in ctx.eval_set]
         ctx.shifts[k] = tolerant_pr_curve([score_fused(s) for s in shifted], truths).average_precision
+        ctx.say(f"height map shifted {k} px: AND-fusion AP {ctx.shifts[k]:.2f}")
     if ctx.shifts[SHIFT_BUDGET_PX] < 0.9:
         raise CheckFailed(f"AND-fusion AP falls to {ctx.shifts[SHIFT_BUDGET_PX]:.2f} at {SHIFT_BUDGET_PX} px shift")
     return "AND-fusion AP by shift: " + ", ".join(f"{k}px {v:.2f}" for k, v in ctx.shifts.items())
 
 
-GROUPS = ("Make the data", "Check the data", "Score every pixel", "Measure")
+GROUPS = ("Phase 1 · Make the data", "Phase 2 · Check the data", "Phase 3 · Score every pixel", "Phase 4 · Measure")
 
 STEPS: tuple[Step, ...] = (
     Step("gen", "1 · Generate one sample",
@@ -306,19 +335,30 @@ def run_pipeline(
     notify = on_update or (lambda _: None)
     notify(results)
 
-    broken = False
+    broken = False  # a failure stops the run: later steps are skipped
+    paused = False  # a waiting phase holds the run: later steps are held until it finishes
     for step, result in zip(STEPS, results):
         if broken:
             result.status = "skipped"
             continue
+        if paused:
+            result.status = "held"
+            continue
         result.status = "running"
+
+        def say(msg: str, r: StepResult = result) -> None:
+            r.log.append(msg)
+            notify(results)
+
+        ctx.say = say
         notify(results)
         start = time.perf_counter()
         try:
             result.summary = step.run(ctx)
             result.status = "passed"
-        except NotReady as e:  # cannot run yet: shown as waiting, the run goes on
+        except NotReady as e:  # the phase is not finished yet: pause here, do not run the next phase
             result.status, result.summary = "waiting", str(e)
+            paused = True
         except CheckFailed as e:  # the step ran, but its pass condition failed
             result.status, result.error = "failed", str(e)
             result.where = _where(e)

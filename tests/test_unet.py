@@ -78,3 +78,13 @@ def test_saved_checkpoint_loads_as_scorer(tmp_path) -> None:
     s = generate_hard_sample(HardConfig(size=64, seed=5))
     score = scorer(s)
     assert score.shape == (64, 64) and score.min() >= 0 and score.max() <= 1
+
+
+def test_training_writes_progress_file_the_page_reads(tmp_path) -> None:
+    import json
+
+    out = tmp_path / "unet_x.pt"
+    train(TrainConfig(use_height=False, steps=3, batch=2, crop=64, base=4), out)
+    progress = json.loads((tmp_path / "unet_x.progress.json").read_text())
+    assert progress["state"] == "done" and progress["step"] == progress["steps"] == 3
+    assert progress["seeds_used"] == 6 and np.isfinite(progress["loss"])
