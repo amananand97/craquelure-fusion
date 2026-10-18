@@ -3,5 +3,6 @@ scipy>=1.10
 scipy>=1.17.1; sys_platform == "darwin"  # older scipy fails to load on recent macOS
 pillow>=10.0
 matplotlib>=3.7
+torch>=2.2
 pytest>=7.0
 streamlit>=1.66

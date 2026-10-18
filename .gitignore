@@ -16,19 +16,16 @@ __pycache__/
 *.key
 *.pem
 
-# Scratch output (the fixed eval set will live elsewhere and IS committed)
+# Scratch output from `python -m craquelure_fusion.generate`
 samples/
+
+# Training progress, read live by the page
+checkpoints/*.progress.json
+
+# Personal study material, kept on this machine only
+notes/
+practice/
 
 # OS / editor
 .DS_Store
-
-# local clutter
-.DS_Store
-__pycache__/
-.pytest_cache/
-
-# study notes stay on the Mac, never in git
-notes/
-
 .vscode/
-checkpoints/*.progress.json
