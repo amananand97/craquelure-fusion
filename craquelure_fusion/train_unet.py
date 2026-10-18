@@ -52,6 +52,7 @@ def _crop_batch(samples, rng: np.random.Generator, crop: int):
 def _write_progress(out: Path, step: int, steps: int, loss: float, seeds_used: int, state: str) -> None:
     """Small file the page reads to show live training progress: <name>.progress.json next to the checkpoint."""
     progress = out.with_suffix(".progress.json")
+    progress.parent.mkdir(parents=True, exist_ok=True)  # checkpoints/ may not exist yet
     progress.write_text(json.dumps({"step": step, "steps": steps, "loss": float(loss), "seeds_used": seeds_used,
                                     "state": state, "updated": time.strftime("%H:%M:%S")}))
 
