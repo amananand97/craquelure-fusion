@@ -1,4 +1,4 @@
-"""The six-step pipeline: green when clean, and each demo fault stops the step built to catch it."""
+"""The nine-step pipeline: green when clean, and each demo fault stops the step built to catch it."""
 
 from pathlib import Path
 
@@ -16,9 +16,11 @@ EXPECTED_FAILURE = {
 }
 
 
-def test_clean_run_passes_every_step() -> None:
+def test_clean_run_passes_every_step_that_can_run() -> None:
     results, ctx = run_pipeline(DATA)
-    assert [r.status for r in results] == ["passed"] * len(STEPS)
+    by_key = {r.key: r.status for r in results}
+    assert all(s == "passed" for k, s in by_key.items() if k != "unet")
+    assert by_key["unet"] == "waiting"  # no checkpoints yet: waiting, not failed, and the run goes on
     assert ctx.means["colour_and_height"]["ap"] > 0.9
 
 
@@ -27,7 +29,7 @@ def test_each_fault_fails_its_step_and_skips_the_rest(fault: str) -> None:
     results, _ = run_pipeline(DATA, fault)
     keys = [r.key for r in results]
     failed_at = keys.index(EXPECTED_FAILURE[fault])
-    assert [r.status for r in results[:failed_at]] == ["passed"] * failed_at
+    assert all(r.status in ("passed", "waiting") for r in results[:failed_at])
     assert results[failed_at].status == "failed"
     assert results[failed_at].error and results[failed_at].where
     assert all(r.status == "skipped" for r in results[failed_at + 1:])
@@ -51,3 +53,9 @@ def test_crash_location_points_into_our_code() -> None:
 def test_unknown_fault_is_rejected() -> None:
     with pytest.raises(ValueError):
         run_pipeline(DATA, "no_such_fault")
+
+
+def test_generate_and_rebuild_steps_pass_on_clean_data() -> None:
+    results, _ = run_pipeline(DATA)
+    by_key = {r.key: r for r in results}
+    assert by_key["gen"].status == "passed" and by_key["rebuild"].status == "passed"

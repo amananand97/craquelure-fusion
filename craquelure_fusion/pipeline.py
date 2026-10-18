@@ -57,6 +57,10 @@ class Context:
     shifts: dict = field(default_factory=dict)
 
 
+class NotReady(Exception):
+    """A step that cannot run yet (for example, a model not trained). Shown as 'waiting', not failed."""
+
+
 @dataclass(frozen=True)
 class Step:
     key: str
@@ -65,13 +69,14 @@ class Step:
     code: str
     passes_if: str
     run: Callable[[Context], str]
+    group: str = ""
 
 
 @dataclass
 class StepResult:
     key: str
     title: str
-    status: str = "pending"  # pending | running | passed | failed | skipped
+    status: str = "pending"  # pending | running | passed | failed | skipped | waiting
     summary: str = ""
     error: str = ""
     where: list[str] = field(default_factory=list)  # file:line in function, outermost first
@@ -79,6 +84,54 @@ class StepResult:
 
 
 # --- the six steps -------------------------------------------------------------
+
+def _generate(ctx: Context) -> str:
+    from craquelure_fusion.generate_hard import HardConfig, generate_hard_sample
+
+    a = generate_hard_sample(HardConfig(seed=3000))
+    b = generate_hard_sample(HardConfig(seed=3000))
+    if not (np.array_equal(a.rgb, b.rgb) and np.array_equal(a.height, b.height)):
+        raise CheckFailed("the same seed made two different samples: the generator is not reproducible")
+    if not a.crack_mask.any():
+        raise CheckFailed("the generated sample has no crack in it")
+    return (f"seed 3000 makes a sample with {int(a.crack_mask.sum())} crack pixels; "
+            "generating it twice gives identical pixels")
+
+
+def _rebuild(ctx: Context) -> str:
+    """Regenerate the first 3 samples of each v2 and v3 evaluation set and compare pixels.
+
+    Pixels, not file bytes: the same pixels can be compressed to different PNG bytes on
+    different machines, so a byte comparison would fail for the wrong reason."""
+    from dataclasses import replace
+
+    from craquelure_fusion.eval_set import SEED_START, VERSIONS, make_sample
+    from craquelure_fusion.generate import encode_height, decode_height, load_sample
+
+    compared = 0
+    for version in ("v2", "v3"):
+        for i in range(3):
+            stored = load_sample(ctx.data_dir / f"eval_{version}" / f"{i:03d}")
+            fresh = make_sample(replace(VERSIONS[version], seed=SEED_START["eval"] + i))
+            same = (np.array_equal(np.round(fresh.rgb * 255) / 255, stored.rgb)
+                    and np.array_equal(decode_height(encode_height(fresh.height)), stored.height)
+                    and np.array_equal(fresh.crack_mask, stored.crack_mask)
+                    and np.array_equal(fresh.stroke_mask, stored.stroke_mask)
+                    and np.array_equal(fresh.impasto_mask, stored.impasto_mask))
+            if not same:
+                raise CheckFailed(f"eval_{version} sample {i:03d} no longer rebuilds to the stored pixels")
+            compared += 1
+    return f"rebuilt {compared} stored samples from their seeds; pixels identical"
+
+
+def _unet(ctx: Context) -> str:
+    """Score with the trained U-Nets. Waits until checkpoints exist (slice 3)."""
+    ckpt = ctx.data_dir.parent / "checkpoints"
+    missing = [n for n in ("unet_3ch.pt", "unet_4ch.pt") if not (ckpt / n).exists()]
+    if missing:
+        raise NotReady("no trained U-Net yet (checkpoints arrive in slice 3)")
+    return "U-Net checkpoints found"
+
 
 def _check_data(ctx: Context) -> str:
     sets = [ctx.data_dir / "val_v2", ctx.data_dir / "eval_v2"]
@@ -176,41 +229,62 @@ def _stress(ctx: Context) -> str:
     return "AND-fusion AP by shift: " + ", ".join(f"{k}px {v:.2f}" for k, v in ctx.shifts.items())
 
 
+GROUPS = ("Make the data", "Check the data", "Score every pixel", "Measure")
+
 STEPS: tuple[Step, ...] = (
-    Step("check", "1 · Check the fixed data",
+    Step("gen", "1 · Generate one sample",
+         ("The recipe (v3): V-shaped cracks, raised paint strokes, impasto valleys with rims, noise, misalignment.",
+          "Generate seed 3000 twice.",
+          "Same seed must give the same pixels; this is what makes every number repeatable."),
+         "generate_hard.py · generate_hard_sample", "same seed, same pixels; the sample contains a crack",
+         _generate, GROUPS[0]),
+    Step("rebuild", "2 · Rebuild stored samples",
+         ("The stored evaluation sets were built from seeds. Rebuild the first 3 samples of v2 and of v3.",
+          "Compare pixels with what is stored on disk.",
+          "Pixels, not file bytes: PNG bytes can differ between computers for identical pixels."),
+         "eval_set.py · make_sample, generate.py · load_sample", "every rebuilt sample matches its stored pixels",
+         _rebuild, GROUPS[0]),
+    Step("check", "3 · Check the fixed data",
          ("Two fixed sets: 30 validation samples choose settings, 30 evaluation samples report results.",
           "When they were built, every file got a fingerprint (sha256).",
           "Recompute every fingerprint and compare. One changed byte is enough to fail."),
-         "eval_set.py · verify_eval_set", "every file matches its fingerprint", _check_data),
-    Step("load", "2 · Load and sanity-check",
+         "eval_set.py · verify_eval_set", "every file matches its fingerprint", _check_data, GROUPS[1]),
+    Step("load", "4 · Load and sanity-check",
          ("Read each sample from disk: photo, height map, crack, stroke and impasto masks.",
           "Check the sizes agree and that each sensor actually measured something.",
           "Bad input is stopped here, before any model sees it."),
          "generate.py · load_sample", "same size everywhere; photo and height both vary; every sample has a crack",
-         _load),
-    Step("score", "3 · Score every pixel",
+         _load, GROUPS[1]),
+    Step("score", "5 · Classical models",
          ("One detector (black top-hat): 'thin, and darker or lower than its surroundings'.",
           "Four models: colour only, height only, OR (either sensor), AND (both sensors).",
           "Each model gives every pixel a score from 0 to 1."),
-         "baseline.py · MODELS", "every score map has the sample's size and stays within 0-1", _score),
-    Step("cutoffs", "4 · Choose cutoffs (validation only)",
+         "baseline.py · MODELS", "every score map has the sample's size and stays within 0-1", _score, GROUPS[2]),
+    Step("unet", "6 · U-Net models",
+         ("A small neural network learns the crack rule from freshly generated training samples.",
+          "Two versions: photo only, and photo plus height map.",
+          "Trained on seeds 10000+, which the evaluation never sees."),
+         "unet.py · UNet, train_unet.py", "both checkpoints exist and load (waits until they are trained)",
+         _unet, GROUPS[2]),
+    Step("cutoffs", "7 · Choose cutoffs (validation only)",
          ("A score becomes yes/no at a cutoff.",
           f"For each model, take the strictest cutoff that still finds {TARGET_RECALL:.0%} of cracks.",
           "Chosen on validation samples only, so the evaluation set stays unseen."),
          "evaluate.py · choose_thresholds", f"every model reaches {TARGET_RECALL:.0%} recall on validation",
-         _cutoffs),
-    Step("measure", "5 · Measure on unseen samples",
+         _cutoffs, GROUPS[3]),
+    Step("measure", "8 · Measure on unseen samples",
          ("Apply each cutoff to the 30 evaluation samples.",
           "Measure AP, cracks found, strokes called crack, impasto called crack.",
           "Compare AND with every other model sample by sample, with 95% intervals."),
          "evaluate.py · per_sample_rows, paired_comparison",
          f"AND beats every model on AP (interval above 0) with under {FALSE_ALARM_LIMIT:.0%} false alarms",
-         _measure),
-    Step("stress", "6 · Stress test: alignment",
+         _measure, GROUPS[3]),
+    Step("stress", "9 · Stress test: alignment",
          ("Real scanners never line the photo and height map up perfectly.",
           "Shift the height map 0-4 px against the photo and measure AND-fusion again.",
           "Shows how much alignment error the method can take."),
-         "pipeline.py · _stress", f"AND-fusion keeps AP at or above 0.9 up to {SHIFT_BUDGET_PX} px", _stress),
+         "pipeline.py · _stress", f"AND-fusion keeps AP at or above 0.9 up to {SHIFT_BUDGET_PX} px", _stress,
+         GROUPS[3]),
 )
 
 
@@ -243,6 +317,8 @@ def run_pipeline(
         try:
             result.summary = step.run(ctx)
             result.status = "passed"
+        except NotReady as e:  # cannot run yet: shown as waiting, the run goes on
+            result.status, result.summary = "waiting", str(e)
         except CheckFailed as e:  # the step ran, but its pass condition failed
             result.status, result.error = "failed", str(e)
             result.where = _where(e)

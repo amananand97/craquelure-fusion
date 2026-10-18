@@ -26,14 +26,19 @@ from craquelure_fusion.metrics import tolerant_pr_curve  # noqa: E402
 from craquelure_fusion.pipeline import FAULTS, STEPS, StepResult, run_pipeline  # noqa: E402
 
 DATA = ROOT / "data"
-COLOURS = {"pending": "#b8b8b8", "running": "#d49a00", "passed": "#2e7d32", "failed": "#c62828", "skipped": "#b8b8b8"}
-ICONS = {"pending": "○", "running": "◔", "passed": "✓", "failed": "✗", "skipped": "–"}
-LABELS = {"pending": "not run", "running": "running…", "passed": "passed", "failed": "failed", "skipped": "skipped"}
+COLOURS = {"pending": "#b8b8b8", "running": "#d49a00", "passed": "#2e7d32", "failed": "#c62828", "skipped": "#b8b8b8", "waiting": "#6d6d9e"}
+ICONS = {"pending": "○", "running": "◔", "passed": "✓", "failed": "✗", "skipped": "–", "waiting": "⧗"}
+LABELS = {"pending": "not run", "running": "running…", "passed": "passed", "failed": "failed", "skipped": "skipped", "waiting": "waiting"}
 NICE = {"colour_only": "Colour only", "height_only": "Height only",
         "colour_or_height": "Colour OR height", "colour_and_height": "Colour AND height"}
 
 
 # --- step grid -----------------------------------------------------------------
+
+def _plain(title: str) -> str:
+    """'5 · Measure on unseen samples' -> 'Measure on unseen samples' (for sentences)."""
+    return title.split(" · ", 1)[-1]
+
 
 def _results() -> list[StepResult]:
     return st.session_state.get("results") or [StepResult(s.key, s.title) for s in STEPS]
@@ -42,7 +47,7 @@ def _results() -> list[StepResult]:
 def _box_css(results: list[StepResult]) -> None:
     rules = []
     for r in results:
-        style = "dashed" if r.status == "skipped" else "solid"
+        style = "dashed" if r.status in ("skipped", "waiting") else "solid"
         width = "3px" if r.status in ("passed", "failed", "running") else "2px"
         rules.append(f".st-key-step_{r.key} {{ border: {width} {style} {COLOURS[r.status]} !important; "
                      f"border-radius: 12px; padding: 0.9rem 1rem; min-height: 165px; }}")
@@ -67,30 +72,37 @@ def _live_grid_html(results: list[StepResult]) -> str:
 
 def _interactive_grid(results: list[StepResult]) -> None:
     _box_css(results)
-    for row in (STEPS[:3], STEPS[3:]):
-        for col, step in zip(st.columns(3, gap="medium"), row):
-            r = next(x for x in results if x.key == step.key)
-            with col.container(key=f"step_{step.key}"):
-                st.markdown(f"**{step.title}**")
-                timing = f" · {r.seconds:.1f} s" if r.status in ("passed", "failed") else ""
-                st.markdown(f"<span style='color:{COLOURS[r.status]};font-weight:600'>"
-                            f"{ICONS[r.status]} {LABELS[r.status]}{timing}</span>", unsafe_allow_html=True)
-                if r.summary:
-                    st.caption(r.summary)
-                if r.error:
-                    st.caption(f":red[{r.error}]")
-                with st.popover("What's inside", width="stretch"):
-                    st.markdown(f"#### {step.title}")
-                    for line in step.what:
-                        st.markdown(f"- {line}")
-                    st.markdown(f"**Passes if:** {step.passes_if}")
-                    st.markdown(f"**Code:** `{step.code}`")
-                    if r.status == "failed":
-                        st.error(r.error)
-                        st.markdown("**Where it broke:**")
-                        st.code("\n".join(r.where) or "(no location recorded)", language=None)
-                    elif r.status == "skipped":
-                        st.info("Skipped: an earlier step failed, so this one would be built on something broken.")
+    for group in dict.fromkeys(s.group for s in STEPS):  # groups in order of first appearance
+        st.subheader(group)
+        members = [s for s in STEPS if s.group == group]
+        for start in range(0, len(members), 3):
+            _grid_row(results, members[start:start + 3])
+
+
+def _grid_row(results: list[StepResult], row: list) -> None:
+    for col, step in zip(st.columns(3, gap="medium"), row):
+        r = next(x for x in results if x.key == step.key)
+        with col.container(key=f"step_{step.key}"):
+            st.markdown(f"**{step.title}**")
+            timing = f" · {r.seconds:.1f} s" if r.status in ("passed", "failed") else ""
+            st.markdown(f"<span style='color:{COLOURS[r.status]};font-weight:600'>"
+                        f"{ICONS[r.status]} {LABELS[r.status]}{timing}</span>", unsafe_allow_html=True)
+            if r.summary:
+                st.caption(r.summary)
+            if r.error:
+                st.caption(f":red[{r.error}]")
+            with st.popover("What's inside", width="stretch"):
+                st.markdown(f"#### {step.title}")
+                for line in step.what:
+                    st.markdown(f"- {line}")
+                st.markdown(f"**Passes if:** {step.passes_if}")
+                st.markdown(f"**Code:** `{step.code}`")
+                if r.status == "failed":
+                    st.error(r.error)
+                    st.markdown("**Where it broke:**")
+                    st.code("\n".join(r.where) or "(no location recorded)", language=None)
+                elif r.status == "skipped":
+                    st.info("Skipped: an earlier step failed, so this one would be built on something broken.")
 
 
 # --- results ---------------------------------------------------------------------
@@ -105,7 +117,7 @@ def _results_section(results: list[StepResult]) -> None:
         return
     if by_key["measure"].status != "passed":
         failed = next((r for r in results if r.status == "failed"), None)
-        st.warning(f"No results: {failed.title if failed else 'a step'} failed. "
+        st.warning(f"No results: {_plain(failed.title) if failed else 'a step'} failed. "
                    "Every result depends on the steps before it, so nothing after a failure is trusted.")
         return
 
@@ -189,8 +201,8 @@ def main() -> None:
 
     if run_clicked:
         def on_update(results: list[StepResult]) -> None:
-            done = sum(r.status in ("passed", "failed") for r in results)
-            running = next((r.title for r in results if r.status == "running"), "finished")
+            done = sum(r.status in ("passed", "failed", "waiting") for r in results)
+            running = next((_plain(r.title) for r in results if r.status == "running"), "finished")
             progress_slot.progress(done / len(results), text=f"{done} of {len(results)} steps · {running}")
             grid_slot.markdown(_live_grid_html(results), unsafe_allow_html=True)
 
@@ -199,10 +211,12 @@ def main() -> None:
         st.rerun()
 
     results = _results()
-    done = sum(r.status in ("passed", "failed") for r in results)
+    done = sum(r.status in ("passed", "failed", "waiting") for r in results)
     failed = next((r for r in results if r.status == "failed"), None)
+    waiting = [_plain(r.title) for r in results if r.status == "waiting"]
     text = ("not run yet" if done == 0 else
-            f"stopped: {failed.title} failed" if failed else "all steps passed")
+            f"stopped: {_plain(failed.title)} failed" if failed else
+            f"all runnable steps passed · waiting: {', '.join(waiting)}" if waiting else "all steps passed")
     progress_slot.progress(done / len(results), text=f"{done} of {len(results)} steps · {text}")
     with grid_slot.container():
         _interactive_grid(results)
