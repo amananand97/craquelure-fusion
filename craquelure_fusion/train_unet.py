@@ -104,6 +104,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # one line per training sample would bury the terminal: keep only the every-50-steps lines
+    logging.getLogger("craquelure_fusion.generate_hard").setLevel(logging.WARNING)
     cfg = TrainConfig(use_height=args.channels == "photo+height", steps=args.steps)
     train(cfg, args.out)
 
