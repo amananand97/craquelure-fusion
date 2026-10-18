@@ -1,5 +1,6 @@
 """Interactive presentation: run the pipeline, watch each step turn green or red,
-click a step to see what it does, see the results underneath.
+open a step to see what it does and what it did, focus on one phase, and explore
+the results (models, samples, misalignment).
 
 Run from the repo root:
     streamlit run app/streamlit_app.py
@@ -10,39 +11,75 @@ from __future__ import annotations
 import html
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import streamlit as st  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from craquelure_fusion.baseline import MODELS  # noqa: E402
+from craquelure_fusion.baseline import score_fused  # noqa: E402
 from craquelure_fusion.evaluate import FUSED  # noqa: E402
 from craquelure_fusion.metrics import tolerant_pr_curve  # noqa: E402
-from craquelure_fusion.pipeline import FAULTS, STEPS, StepResult, run_pipeline  # noqa: E402
+from craquelure_fusion.pipeline import FAULTS, GROUPS, STEPS, StepResult, run_pipeline  # noqa: E402
 
 DATA = ROOT / "data"
-COLOURS = {"pending": "#b8b8b8", "running": "#d49a00", "passed": "#2e7d32", "failed": "#c62828", "skipped": "#b8b8b8", "waiting": "#6d6d9e", "held": "#8a8a8a"}
+COLOURS = {"pending": "#8a8a8a", "running": "#d49a00", "passed": "#2e7d32", "failed": "#c62828",
+           "skipped": "#8a8a8a", "waiting": "#6d6d9e", "held": "#8a8a8a"}
 ICONS = {"pending": "○", "running": "◔", "passed": "✓", "failed": "✗", "skipped": "–", "waiting": "⧗", "held": "⏸"}
-LABELS = {"pending": "not run", "running": "running…", "passed": "passed", "failed": "failed", "skipped": "skipped", "waiting": "waiting", "held": "held"}
+LABELS = {"pending": "not run", "running": "running…", "passed": "passed", "failed": "failed",
+          "skipped": "skipped", "waiting": "waiting", "held": "held"}
+STATE_TEXT = {"pending": "not started", "running": "running…", "passed": "all passed", "failed": "failed",
+              "skipped": "skipped", "waiting": "waiting for a trained model", "held": "held"}
 NICE = {"colour_only": "Colour only", "height_only": "Height only",
-        "colour_or_height": "Colour OR height", "colour_and_height": "Colour AND height"}
+        "colour_or_height": "Colour OR height", "colour_and_height": "Colour AND height",
+        "unet_3ch": "U-Net: photo only", "unet_4ch": "U-Net: photo + height"}
+SHORT = dict(zip(GROUPS, ("1 · Make data", "2 · Check data", "3 · Score pixels", "4 · Measure")))
+BLURB = {
+    GROUPS[0]: "Build the synthetic photos and height maps from seeds, so every number can be repeated exactly.",
+    GROUPS[1]: "Confirm the fixed sets are unchanged and readable before any model looks at them.",
+    GROUPS[2]: "Each detector gives every pixel a crack score from 0 to 1: classical rules first, then the U-Nets.",
+    GROUPS[3]: "Choose each cutoff on validation samples, then measure on the 30 samples nobody tuned on.",
+}
+ALL = "All phases"
 
 
-# --- step grid -----------------------------------------------------------------
+# --- helpers -------------------------------------------------------------------
 
 def _plain(title: str) -> str:
     """'5 · Measure on unseen samples' -> 'Measure on unseen samples' (for sentences)."""
     return title.split(" · ", 1)[-1]
 
 
+def _name(model: str) -> str:
+    return NICE.get(model, model)
+
+
 def _results() -> list[StepResult]:
     return st.session_state.get("results") or [StepResult(s.key, s.title) for s in STEPS]
+
+
+def _pairs(results: list[StepResult], group: str) -> list[tuple]:
+    return [(s, r) for s, r in zip(STEPS, results) if s.group == group]
+
+
+def _phase_state(pairs: list[tuple]) -> str:
+    """One state for a whole phase: the most urgent state among its steps."""
+    states = [r.status for _, r in pairs]
+    for urgent in ("failed", "running", "waiting", "held"):
+        if urgent in states:
+            return urgent
+    if all(s == "passed" for s in states):
+        return "passed"
+    if all(s == "pending" for s in states):
+        return "pending"
+    return "skipped"
 
 
 def _box_css(results: list[StepResult]) -> None:
@@ -51,7 +88,7 @@ def _box_css(results: list[StepResult]) -> None:
         style = "dashed" if r.status in ("skipped", "waiting", "held") else "solid"
         width = "3px" if r.status in ("passed", "failed", "running") else "2px"
         rules.append(f".st-key-step_{r.key} {{ border: {width} {style} {COLOURS[r.status]} !important; "
-                     f"border-radius: 12px; padding: 0.9rem 1rem; min-height: 165px; }}")
+                     f"border-radius: 12px; padding: 0.9rem 1rem; min-height: 150px; }}")
     st.markdown(f"<style>{' '.join(rules)}</style>", unsafe_allow_html=True)
 
 
@@ -60,7 +97,7 @@ def _live_grid_html(results: list[StepResult]) -> str:
     cells = []
     for r in results:
         c = COLOURS[r.status]
-        style = "dashed" if r.status == "skipped" else "solid"
+        style = "dashed" if r.status in ("skipped", "waiting", "held") else "solid"
         detail = html.escape(r.log[-1] if r.status == "running" and r.log else (r.summary or r.error or LABELS[r.status]))
         cells.append(
             f"<div style='border:3px {style} {c};border-radius:12px;padding:14px;min-height:120px'>"
@@ -71,18 +108,35 @@ def _live_grid_html(results: list[StepResult]) -> str:
             + "".join(cells) + "</div>")
 
 
-def _interactive_grid(results: list[StepResult]) -> None:
+# --- phase strip and step grid ----------------------------------------------------
+
+def _phase_strip(results: list[StepResult]) -> None:
+    """Four phase tiles: the whole run at a glance, in the order the phases must happen."""
+    for col, group in zip(st.columns(len(GROUPS)), GROUPS):
+        pairs = _pairs(results, group)
+        state = _phase_state(pairs)
+        done = sum(r.status == "passed" for _, r in pairs)
+        col.markdown(
+            f"**{SHORT[group]}**  \n"
+            f"<span style='color:{COLOURS[state]};font-weight:600'>{ICONS[state]} {STATE_TEXT[state]}</span>  \n"
+            f"<span style='opacity:0.75'>{done} of {len(pairs)} steps</span>",
+            unsafe_allow_html=True)
+
+
+def _interactive_grid(results: list[StepResult], focus: str | None) -> None:
     _box_css(results)
-    for group in dict.fromkeys(s.group for s in STEPS):  # groups in order of first appearance
+    for group in GROUPS:
+        if focus and group != focus:
+            continue
+        pairs = _pairs(results, group)
         st.subheader(group)
-        members = [s for s in STEPS if s.group == group]
-        for start in range(0, len(members), 3):
-            _grid_row(results, members[start:start + 3])
+        st.caption(BLURB[group])
+        for start in range(0, len(pairs), 3):
+            _grid_row(pairs[start:start + 3])
 
 
-def _grid_row(results: list[StepResult], row: list) -> None:
-    for col, step in zip(st.columns(3, gap="medium"), row):
-        r = next(x for x in results if x.key == step.key)
+def _grid_row(row: list[tuple]) -> None:
+    for col, (step, r) in zip(st.columns(3, gap="medium"), row):
         with col.container(key=f"step_{step.key}"):
             st.markdown(f"**{step.title}**")
             timing = f" · {r.seconds:.1f} s" if r.status in ("passed", "failed") else ""
@@ -106,9 +160,18 @@ def _grid_row(results: list[StepResult], row: list) -> None:
                     st.code("\n".join(r.where) or "(no location recorded)", language=None)
                 elif r.status == "skipped":
                     st.info("Skipped: an earlier step failed, so this one would be built on something broken.")
+                elif r.status == "held":
+                    st.info("Held: an earlier phase is still waiting, so this phase has not started.")
+            if r.log:
+                with st.expander(f"What it did · {len(r.log)} lines", expanded=r.status == "running"):
+                    st.code("\n".join(r.log), language=None)
 
 
 # --- results ---------------------------------------------------------------------
+
+def _step_sample(delta: int, n: int) -> None:
+    st.session_state["sample_idx"] = (st.session_state.get("sample_idx", 0) + delta) % n
+
 
 def _results_section(results: list[StepResult]) -> None:
     ctx = st.session_state.get("ctx")
@@ -124,25 +187,34 @@ def _results_section(results: list[StepResult]) -> None:
                    "Every result depends on the steps before it, so nothing after a failure is trusted.")
         return
 
-    cols = st.columns(len(MODELS))
-    for col, name in zip(cols, MODELS):
+    names = list(ctx.means)
+    best = max(names, key=lambda n: ctx.means[n]["ap"])
+    st.success(f"Best on the 30 unseen samples: **{_name(best)}**, AP {ctx.means[best]['ap']:.2f} "
+               "(1.00 is perfect).")
+
+    cols = st.columns(len(names))
+    for col, name in zip(cols, names):
         m = ctx.means[name]
-        col.metric(NICE[name], f"AP {m['ap']:.2f}")
+        col.metric(_name(name), f"AP {m['ap']:.2f}")
         col.caption(f"cracks found {m['recall']:.0%}  \nstrokes called crack {m['stroke_false_alarm']:.0%}  \n"
                     f"impasto called crack {m['impasto_false_alarm']:.0%}")
-    st.caption("AP = area under the precision-recall curve, mean over 30 unseen samples. 1.00 is perfect.")
 
     left, right = st.columns(2)
+    shown = left.multiselect("Models on the curve", names, default=names, format_func=_name, key="curve_models")
     truths = [s.crack_mask for _, s in ctx.eval_set]
-    fig, ax = plt.subplots(figsize=(5, 4))
-    for name in MODELS:
-        c = tolerant_pr_curve(ctx.eval_scores[name], truths)
-        ax.plot(c.recall, c.precision, label=NICE[name])
-    ax.set(xlabel="cracks found (recall)", ylabel="predictions that are cracks (precision)", xlim=(0, 1.02), ylim=(0, 1.02))
-    ax.legend(fontsize=8, loc="lower left")
-    fig.tight_layout()
-    left.pyplot(fig)
-    plt.close(fig)
+    if shown:
+        fig, ax = plt.subplots(figsize=(5, 4))
+        for name in shown:
+            c = tolerant_pr_curve(ctx.eval_scores[name], truths)
+            ax.plot(c.recall, c.precision, label=f"{_name(name)} (AP {c.average_precision:.2f})")
+        ax.set(xlabel="cracks found (recall)", ylabel="predictions that are cracks (precision)",
+               xlim=(0, 1.02), ylim=(0, 1.02))
+        ax.legend(fontsize=8, loc="lower left")
+        fig.tight_layout()
+        left.pyplot(fig)
+        plt.close(fig)
+    else:
+        left.info("Pick at least one model to draw its curve.")
 
     if ctx.shifts:
         fig, ax = plt.subplots(figsize=(5, 4))
@@ -153,22 +225,32 @@ def _results_section(results: list[StepResult]) -> None:
         right.pyplot(fig)
         plt.close(fig)
 
-    st.subheader("Colour AND height minus each other model, sample by sample")
-    lines = ["| vs | AP | strokes called crack | impasto called crack |", "|---|---|---|---|"]
+    st.subheader("Colour AND height against each other model")
+    st.caption("Mean difference over the 30 samples. Positive AP = AND is better. "
+               "The bracket is a 95% bootstrap interval: if it crosses 0, the gap could be chance.")
+    lines = ["| compared with | AP | strokes called crack | impasto called crack |", "|---|---|---|---|"]
     for other, comp in ctx.comparisons.items():
         cells = [f"{c['mean_difference']:+.2f} [{c['ci95'][0]:+.2f}, {c['ci95'][1]:+.2f}]" for c in comp.values()]
-        lines.append(f"| {NICE[other]} | " + " | ".join(cells) + " |")
+        lines.append(f"| {_name(other)} | " + " | ".join(cells) + " |")
     st.markdown("\n".join(lines))
-    st.caption("Mean difference over 30 samples, with a 95% bootstrap interval in brackets.")
 
+    # One sample at a time: buttons move through the set, the slider jumps anywhere.
     st.subheader("Look at one sample")
     ids = [i for i, _ in ctx.eval_set]
-    idx = ids.index(st.selectbox("Evaluation sample", ids))
+    n = len(ids)
+    prev_col, mid_col, next_col = st.columns([1, 4, 1])
+    prev_col.button("◀ previous", on_click=_step_sample, args=(-1, n), use_container_width=True)
+    next_col.button("next ▶", on_click=_step_sample, args=(1, n), use_container_width=True)
+    idx = st.slider("Evaluation sample", 0, n - 1, key="sample_idx", format="%d")
+    mid_col.caption(f"Sample {ids[idx]} · {idx + 1} of {n} unseen samples")
     s = ctx.eval_set[idx][1]
+
     panels = [("photo", s.rgb, None), ("height", s.height, "viridis"), ("answer: crack", s.crack_mask, "gray"),
               ("stroke (fools colour)", s.stroke_mask, "gray"), ("impasto (fools height)", s.impasto_mask, "gray")]
-    panels += [(NICE[n], ctx.eval_scores[n][idx] >= ctx.thresholds[n], "gray") for n in MODELS]
-    fig, axes = plt.subplots(3, 3, figsize=(10, 10))
+    panels += [(f"{_name(m)} · calls crack", ctx.eval_scores[m][idx] >= ctx.thresholds[m], "gray") for m in ctx.means]
+    fig, axes = plt.subplots(3, 4, figsize=(13, 10))
+    for ax in axes.flat[len(panels):]:
+        ax.axis("off")
     for ax, (title, img, cmap) in zip(axes.flat, panels):
         ax.imshow(img, cmap=cmap)
         ax.set_title(title, fontsize=10)
@@ -176,6 +258,24 @@ def _results_section(results: list[StepResult]) -> None:
     fig.tight_layout()
     st.pyplot(fig)
     plt.close(fig)
+
+    # Move the height map and watch the AND mask break. The cutoff stays the one set at 0 px.
+    st.subheader("Move the height map")
+    k = st.slider("Height map shifted by (px)", 0, 4, 0, key="shift_px")
+    shifted = replace(s, height=np.roll(s.height, k, axis=1))
+    pred = score_fused(shifted) >= ctx.thresholds[FUSED]
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+    axes[0].imshow(s.crack_mask, cmap="gray")
+    axes[0].set_title("answer: crack", fontsize=10)
+    axes[1].imshow(pred, cmap="gray")
+    axes[1].set_title(f"AND-fusion at {k} px shift", fontsize=10)
+    for ax in axes:
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+    st.caption(f"Cutoff fixed at 0 px on validation ({ctx.thresholds[FUSED]:.2f}). "
+               "Watch the white mask lose its shape as the height map drifts.")
 
     st.info("Limits: synthetic data where each confuser copies a crack exactly in one sensor, so an "
             "agreement rule is bound to win; a classical detector; no real sensor noise. "
@@ -212,6 +312,11 @@ def main() -> None:
     st.title("How the crack detector works, step by step")
     st.markdown("A crack is **dark AND sunken**. A painted stroke is only dark; an impasto valley is only "
                 "sunken. Does combining a photo with a height map tell them apart?")
+    st.markdown("**How to read this:** the run goes through four phases in order, and a phase cannot start "
+                "until the one before it passes. Each box is a step. **What's inside** explains it; "
+                "**What it did** shows its log. "
+                "Colours: :green[green] passed · :red[red] failed · :violet[dashed purple] waiting for a "
+                "trained model · :gray[dashed grey] held or skipped.")
 
     with st.sidebar:
         st.header("Demo: break something")
@@ -223,6 +328,9 @@ def main() -> None:
 
     run_clicked = st.button("Run pipeline", type="primary")
     progress_slot = st.empty()
+    _live_training()
+    strip_slot = st.container()
+    focus_slot = st.container()
     grid_slot = st.empty()
 
     if run_clicked:
@@ -236,7 +344,6 @@ def main() -> None:
         st.session_state.update(results=results, ctx=ctx, fault=fault)
         st.rerun()
 
-    _live_training()
     results = _results()
     done = sum(r.status in ("passed", "failed", "waiting") for r in results)
     failed = next((r for r in results if r.status == "failed"), None)
@@ -245,8 +352,14 @@ def main() -> None:
             f"stopped: {_plain(failed.title)} failed" if failed else
             f"paused: waiting for {', '.join(waiting)}" if waiting else "all steps passed")
     progress_slot.progress(done / len(results), text=f"{done} of {len(results)} steps · {text}")
+
+    with strip_slot:
+        _phase_strip(results)
+    with focus_slot:
+        focus_choice = st.segmented_control("Show", [ALL, *SHORT.values()], default=ALL, key="focus")
+    focus = next((g for g, label in SHORT.items() if label == focus_choice), None)
     with grid_slot.container():
-        _interactive_grid(results)
+        _interactive_grid(results, focus)
     _results_section(results)
 
 
