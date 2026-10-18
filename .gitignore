@@ -29,3 +29,6 @@ __pycache__/
 
 # study notes stay on the Mac, never in git
 notes/
+
+.vscode/
+checkpoints/*.progress.json
