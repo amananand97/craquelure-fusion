@@ -1,0 +1,62 @@
+{
+  "size": 256,
+  "weave_period_px": 6.0,
+  "weave_height": 1.0,
+  "n_cracks": [
+    1,
+    2
+  ],
+  "n_strokes": [
+    1,
+    2
+  ],
+  "n_impasto": [
+    1,
+    2
+  ],
+  "width_px": [
+    2.0,
+    4.0
+  ],
+  "crack_darkness": [
+    0.35,
+    0.65
+  ],
+  "stroke_darkness": [
+    0.35,
+    0.65
+  ],
+  "crack_depth": [
+    5.0,
+    12.0
+  ],
+  "impasto_depth": [
+    5.0,
+    12.0
+  ],
+  "impasto_rim": [
+    1.0,
+    3.0
+  ],
+  "impasto_shadow": [
+    0.0,
+    0.25
+  ],
+  "stroke_raise": [
+    0.3,
+    1.5
+  ],
+  "height_noise": [
+    0.3,
+    1.2
+  ],
+  "rgb_noise": [
+    0.005,
+    0.02
+  ],
+  "misregister_px": [
+    0.0,
+    1.5
+  ],
+  "seed": 0
+}

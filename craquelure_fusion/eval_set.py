@@ -10,6 +10,8 @@ images, so v2 is reported on seeds nobody has looked at (3000+).
 Versions (the data design, not the code):
     v1  crack + painted stroke                  (committed in data/eval_v1, kept for history)
     v2  crack + painted stroke + impasto valley (the honest test: each single sensor has a confuser)
+    v3  harder and more realistic: V-shaped cracks, raised strokes, impasto with rims and shadow,
+        overlapping darkness, sensor noise, misaligned height map (see generate_hard.py)
 
 Build:   python -m craquelure_fusion.eval_set --version v2 --split eval
 Verify:  python -m craquelure_fusion.eval_set --version v2 --split eval --verify
@@ -25,14 +27,21 @@ import json
 import logging
 from pathlib import Path
 
-from craquelure_fusion.generate import SampleConfig, generate_sample, save_sample
+from craquelure_fusion.generate import Sample, SampleConfig, generate_sample, save_sample
+from craquelure_fusion.generate_hard import HardConfig, generate_hard_sample
 
 logger = logging.getLogger(__name__)
 
 VERSIONS = {
     "v1": SampleConfig(),
     "v2": SampleConfig(n_impasto=1),
+    "v3": HardConfig(),
 }
+
+
+def make_sample(cfg: SampleConfig | HardConfig) -> Sample:
+    """The right generator for the config's version."""
+    return generate_hard_sample(cfg) if isinstance(cfg, HardConfig) else generate_sample(cfg)
 SEED_START = {"eval": 3000, "val": 2000, "eval_v1": 1000}
 N_SAMPLES = 30
 FILES_PER_SAMPLE = ("rgb.png", "height.png", "mask.png", "stroke_mask.png", "impasto_mask.png")
@@ -52,7 +61,7 @@ def build_eval_set(
     out_dir: Path,
     n: int = N_SAMPLES,
     seed_start: int = SEED_START["eval"],
-    base_cfg: SampleConfig | None = None,
+    base_cfg: SampleConfig | HardConfig | None = None,
 ) -> Path:
     """Generate n samples with seeds seed_start .. seed_start+n-1 and save them.
 
@@ -65,7 +74,7 @@ def build_eval_set(
 
     for i in range(n):
         seed = seed_start + i
-        sample = generate_sample(dataclasses.replace(base, seed=seed))
+        sample = make_sample(dataclasses.replace(base, seed=seed))
         sample_id = f"{i:03d}"
         sample_dir = out_dir / sample_id
         save_sample(sample, sample_dir)

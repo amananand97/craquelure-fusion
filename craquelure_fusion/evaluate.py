@@ -116,7 +116,7 @@ def pooled_ap(eval_set: Split, eval_scores: Scores) -> dict[str, float]:
     return {name: tolerant_pr_curve(eval_scores[name], truths).average_precision for name in MODELS}
 
 
-def save_plots(eval_set: Split, eval_scores: Scores, mis: dict, out_dir: Path) -> None:
+def save_plots(eval_set: Split, eval_scores: Scores, mis: dict, out_dir: Path, eval_dir_name: str = "eval") -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -129,7 +129,7 @@ def save_plots(eval_set: Split, eval_scores: Scores, mis: dict, out_dir: Path) -
         ax.plot(c.recall, c.precision, label=f"{name} (pooled AP {c.average_precision:.2f})")
     ax.axvline(TARGET_RECALL, color="grey", ls=":", lw=1)
     ax.set(xlabel="recall (cracks found)", ylabel="precision (predictions that are cracks)",
-           xlim=(0, 1.02), ylim=(0, 1.02), title="Eval set v2, all 30 samples pooled, tolerance 2 px")
+           xlim=(0, 1.02), ylim=(0, 1.02), title=f"{eval_dir_name}: all samples pooled, tolerance 2 px")
     ax.legend(loc="lower left", fontsize=8)
     fig.tight_layout()
     fig.savefig(out_dir / "pr_curves.png", dpi=130)
@@ -175,16 +175,20 @@ def run(val_dir: Path, eval_dir: Path, out_dir: Path) -> dict:
         "misregistration_pooled_ap": mis,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    save_plots(eval_set, eval_scores, mis, out_dir)
+    save_plots(eval_set, eval_scores, mis, out_dir, eval_dir.name)
     return summary
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the experiment on the fixed sets.")
-    parser.add_argument("--val", type=Path, default=Path("data/val_v2"))
-    parser.add_argument("--eval", type=Path, default=Path("data/eval_v2"))
-    parser.add_argument("--out", type=Path, default=Path("results"))
+    parser.add_argument("--version", default="v2", help="data version: reads data/val_<v>, data/eval_<v>")
+    parser.add_argument("--val", type=Path, default=None)
+    parser.add_argument("--eval", type=Path, default=None)
+    parser.add_argument("--out", type=Path, default=None, help="default: results/ for v2, results/<v>/ otherwise")
     args = parser.parse_args(argv)
+    args.val = args.val or Path(f"data/val_{args.version}")
+    args.eval = args.eval or Path(f"data/eval_{args.version}")
+    args.out = args.out or (Path("results") if args.version == "v2" else Path("results") / args.version)
     logging.basicConfig(level=logging.WARNING)
 
     s = run(args.val, args.eval, args.out)

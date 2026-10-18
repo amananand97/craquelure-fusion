@@ -78,14 +78,17 @@ def make_canvas(cfg: SampleConfig, rng: np.random.Generator) -> tuple[np.ndarray
     return rgb.astype(np.float32), height.astype(np.float32)
 
 
-def random_path_mask(
+def random_path_distance(
     size: int,
-    width_px: float,
     rng: np.random.Generator,
     n_steps: int = 400,
     turn_std: float = 0.08,
 ) -> np.ndarray:
-    """A thin wandering line as a boolean mask (random walk, then thickened)."""
+    """Random walk -> distance (px) from every pixel to the walked centreline.
+
+    Thresholding the distance gives a line of any width; using the distance itself
+    gives a profile across the line (e.g. a V-shaped crack, deepest at the centre).
+    """
     pos = rng.uniform(0.2 * size, 0.8 * size, size=2)
     angle = rng.uniform(0, 2 * np.pi)
     centreline = np.zeros((size, size), dtype=bool)
@@ -98,9 +101,18 @@ def random_path_mask(
             break
         centreline[row, col] = True
 
-    # distance from every pixel to the nearest centreline pixel
-    dist = ndi.distance_transform_edt(~centreline)
-    return dist <= width_px / 2
+    return ndi.distance_transform_edt(~centreline)
+
+
+def random_path_mask(
+    size: int,
+    width_px: float,
+    rng: np.random.Generator,
+    n_steps: int = 400,
+    turn_std: float = 0.08,
+) -> np.ndarray:
+    """A thin wandering line as a boolean mask (random walk, then thickened)."""
+    return random_path_distance(size, rng, n_steps, turn_std) <= width_px / 2
 
 
 def encode_height(height: np.ndarray) -> np.ndarray:
